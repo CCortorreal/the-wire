@@ -221,3 +221,26 @@ test('CLI end to end: lease → send by mailbox name → inbox → status → he
   const r = spawnSync(process.execPath, [CLI, 'send', '--from', 'claude', '--to', 'nobody', '--kind', 'notice', '--task', 't', '--summary', 'x', '--root', p], { encoding: 'utf8', env, windowsHide: true });
   assert.equal(r.status, 1); assert.match(r.stderr, /No live lease for mailbox "nobody"/);
 });
+
+test('prompt hook is quiet when nothing is new and nothing awaits action', t => {
+  const r = root(t);
+  const hook = path.join(REPO, 'lib', 'hook.mjs');
+  const session = '22222222-2222-4222-8222-222222222222';
+  const run = () => spawnSync(process.execPath, [hook, '--root', r, '--provider', 'claude'], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: session, prompt: 'hello', cwd: r }),
+    encoding: 'utf8',
+  });
+  const empty = run();
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.deepEqual(JSON.parse(empty.stdout.trim()), {}, 'an empty inbox must inject nothing');
+  enqueue(r, msg({ kind: 'notice', summary: 'A notice that needs no reply' }));
+  const first = run();
+  const out = JSON.parse(first.stdout.trim());
+  assert.ok(out.hookSpecificOutput?.additionalContext?.includes('NEW this pull'), 'the pull that first sees a message surfaces it');
+  const again = run();
+  assert.deepEqual(JSON.parse(again.stdout.trim()), {}, 'the same received notice must not be re-injected on the next prompt');
+  enqueue(r, msg({ kind: 'assignment', summary: 'Review this revision please' }));
+  run();
+  const pending = run();
+  assert.match(JSON.parse(pending.stdout.trim()).hookSpecificOutput.additionalContext, /ACTION PENDING/, 'an assignment awaiting action stays visible until acted on');
+});
