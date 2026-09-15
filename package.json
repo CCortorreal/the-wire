@@ -1,0 +1,25 @@
+{
+  "name": "the-wire",
+  "version": "0.1.0",
+  "description": "Let your Claude Code and Codex sessions talk to each other. Zero dependencies. Written for the agent to read and set up itself.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Carlos Cortorreal",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "the-wire": "./bin/the-wire.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "agents",
+    "multi-agent",
+    "messaging",
+    "zero-dependency"
+  ]
+}
