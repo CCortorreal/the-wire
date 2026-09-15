@@ -26,7 +26,7 @@ The pipe closes cleanly whether or not the session consumed the frame. The broke
 marks a Claude-bound message `accepted`; it stays `unconfirmed` until the recipient's own pull
 records the hash. Report "sent", "acknowledged" and "consumed" as three separate facts.
 
-## 3. Codex's `queue` works while its app-server daemon is dead — **supported**
+## 3. Codex's `queue` works while its app-server daemon is dead — **supported, n=1**
 
 `codex queue --thread <uuid> --message <text>` returned `Queued message <uuid> for thread <uuid>.`
 and the message surfaced in the target Codex task **after that task's current turn ended**, on a
@@ -34,27 +34,43 @@ machine where `codex app-server daemon version` reported a dead control socket. 
 daemon, change ACLs, or open a second Codex session to "fix" the socket; the queue path does not
 need it.
 
-*Blind spot:* one CLI version (2026.09). The success line is matched loosely for that reason.
+*Blind spot:* one CLI build (`0.154.0-alpha.6.2`) on one Windows host. Because transport
+acceptance is a safety boundary, the success line is matched as one complete line with two valid
+UUIDs and the exact target thread. A wording change fails closed to `unconfirmed`; `doctor
+--provider codex` separately probes whether `queue --help` still advertises `--thread` and
+`--message`.
 
-## 4. From inside Codex's sandbox, the Claude pipe returns `EPERM` — **supported**
+## 4. From inside Codex's sandbox, the Claude pipe returns `EPERM` — **supported, n=1**
 
-The same send succeeded through Codex's normal escalated-approval mechanism. The right move is to
-ask for that approval, not to disable the sandbox, impersonate a Claude process, reuse a child
-token, or edit the registry.
+The same send succeeded through Codex's normal escalated-approval mechanism. The right move after
+an explicit permission error is to ask for that approval, not to disable the sandbox, impersonate
+a Claude process, reuse a child token, or edit the registry. An `unconfirmed` wake alone does not
+establish that `EPERM` occurred and must not trigger an automatic retry.
 
-## 5. Windows `codex` on PATH is an npm `.cmd` shim — **established**
+## 5. Windows `codex` on PATH is always an npm `.cmd` shim — **refuted**
 
-A `.cmd` cannot be spawned without a shell. `codex-queue.mjs` prefers running
-`%APPDATA%/npm/node_modules/@openai/codex/bin/codex.js` under the current `node`; set
-`THE_WIRE_CODEX_BIN` to override. (Same trap as in `acp-wire`.)
+One observed installation used an npm `.cmd`, but a later Codex Desktop installation exposed a
+native `codex.exe` on `PATH`. The driver now prefers a real `.exe`/`.com`, then uses an npm
+`codex.js` only when `stat` proves it is a readable file. This matters inside sandboxes where an
+access check can succeed for a path that cannot actually be opened. `THE_WIRE_CODEX_BIN` remains
+the explicit escape hatch for other layouts.
 
-## 6. Re-waking through a mailbox lease delivers to the wrong session — **established (fixed)**
+## 6. Codex exposes its current session id to child commands — **supported, n=1**
+
+On the observed Codex Desktop build, `CODEX_THREAD_ID` and `CODEX_SESSION_ID` both carried the
+current task UUID. `the-wire discover` validates and reports those variables before suggesting a
+thread-listing tool or asking the user. This is stronger than selecting a rollout file by mtime,
+but it is not documented as a cross-host contract.
+
+*Blind spot:* one Codex Desktop build. Other Codex hosts may expose neither variable.
+
+## 7. Re-waking through a mailbox lease delivers to the wrong session — **established (fixed)**
 
 The steward once re-resolved `<provider>-desk` on every re-wake. A lease takeover between the
 original send and the re-wake sent three copies of one session's notice to *another* session. The
 envelope's `to` is exact and immutable; the steward now wakes the addressee and nobody else.
 
-## 7. Pull-path receipt is real — **supported**
+## 8. Pull-path receipt is real — **supported**
 
 With the prompt hook installed, a notice sent to a Claude session was recorded `received` by the
 hook's pull *before* the session's model saw or acted on anything, and the push wake had been
@@ -62,11 +78,11 @@ hook's pull *before* the session's model saw or acted on anything, and the push 
 
 *Blind spot:* one session pair, one day.
 
-## 8. The same skill fires at very different rates on the two providers — **suspected (cause)**
+## 9. The same skill fires at very different rates on the two providers — **suspected (cause)**
 
 Codex's developer message lists every project skill *with its full frontmatter description*
-(from `.agents/skills/` and its user/system roots), so a skill fires whenever the description
-matches. One project skill loaded in 26 Codex sessions and 0 Claude sessions over a month. The
+(from `.agents/skills/` and its user/system roots), so the model can select a skill from its
+trigger description. One project skill loaded in 26 Codex sessions and 0 Claude sessions over a month. The
 Claude lane first read this as "Claude lists project skills by name only" — the model-visible list
 in that session did show bare names — but the Codex lane's independent audit found Claude Skill
 calls for *other* skills in the same period, so description matching does work there. The
@@ -78,14 +94,34 @@ reads, and the skill description leads with its verbs.
 *Blind spot:* one machine, one month, two different transcript parsers (the two lanes counted
 differently — which is itself the lesson).
 
-## 9. Two sessions, one prompt — **supported**
+## 10. Two sessions, one prompt — **supported**
 
 The cleanest way to bring the second agent up was to paste the *same* human prompt into both.
 Each one then found the other by matching that prompt in the peer's transcript — which is exactly
 the guess the-wire replaces with leases: the agent that leased `codex` is the one you mean.
 
-## 10. Caps — **established**
+## 11. Caps — **established**
 
 Summaries: 1200 chars. Status summaries: 1000. Log: 100 messages / 256 KB. These bit the authors
 within the first hour of real use. They are deliberate: the wire carries decisions and pointers;
 the repo carries the work.
+
+## 12. POSIX behavior is a design reading, not a port — **suspected**
+
+The file-backed broker uses Node filesystem primitives that exist on macOS and Linux, and the
+Codex driver falls back to an executable named `codex` on `PATH`. The Claude transport accepts an
+absolute Unix-domain socket path containing `cc-msg-`, and Node can connect to such a path. Those
+facts make a POSIX port plausible; they do not establish the registry schema, socket naming,
+authentication frame, hook behavior, or live round trip on either platform.
+
+Two narrower cautions follow from the implementation:
+
+- The transaction writes and fsyncs a temporary file before renaming it in the same directory.
+  That protects against a torn process write, but the parent directory is not fsynced; power-loss
+  durability on POSIX is not established.
+- State-file permissions inherit the user's umask. The wire assumes one OS user and a shared root
+  that is not writable by untrusted local users. Do not use it as a multi-user IPC boundary.
+
+On POSIX, a socket permission failure may be `EACCES` rather than Windows `EPERM`. Report the
+actual error and use the host's normal approval model; never translate an unconfirmed wake into a
+permission diagnosis.

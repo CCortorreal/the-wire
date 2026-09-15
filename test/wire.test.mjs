@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { enqueue, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, status, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
-import { wake as codexWake, codexBin } from '../lib/drivers/codex-queue.mjs';
+import { wake as codexWake, codexBin, probeCodex, parseQueueAcceptance } from '../lib/drivers/codex-queue.mjs';
 import { sweep } from '../lib/steward.mjs';
 import { validateReferences, validateText } from '../lib/store.mjs';
 
@@ -137,6 +137,34 @@ test('codex driver: accepts only exit 0 + a queued id for the exact thread; env 
   assert.equal(codexWake('not-a-uuid', 'body', { run: ok }).delivered, false);
   assert.deepEqual(codexBin({ THE_WIRE_CODEX_BIN: '/x/codex.js' }), { cmd: process.execPath, args: ['/x/codex.js'] });
   assert.deepEqual(codexBin({ THE_WIRE_CODEX_BIN: '/x/codex' }), { cmd: '/x/codex', args: [] });
+});
+test('codex driver: resolves a real Windows executable before a phantom npm entrypoint', () => {
+  const native = 'C:\\Codex\\bin\\codex.exe';
+  const bin = codexBin(
+    { Path: 'C:\\missing;C:\\Codex\\bin', APPDATA: 'C:\\Users\\person\\AppData\\Roaming' },
+    { platform: 'win32', isFile: file => file.toLowerCase() === native.toLowerCase() },
+  );
+  assert.deepEqual(bin, { cmd: native, args: [] });
+});
+test('codex driver: capability probe requires version plus queue thread/message flags', () => {
+  const run = (_cmd, args) => {
+    if (args.at(-1) === '--version') return { status: 0, stdout: 'codex-cli test\n' };
+    if (args.slice(-2).join(' ') === 'queue --help') return { status: 0, stdout: 'Usage: codex queue --thread <THREAD> --message <TEXT>\n' };
+    return { status: 1, stdout: '' };
+  };
+  assert.deepEqual(probeCodex({ run, env: { THE_WIRE_CODEX_BIN: '/x/codex' } }), {
+    resolved: '/x/codex', version: 'codex-cli test', queueSupported: true,
+  });
+  const noQueue = probeCodex({ run: (_cmd, args) => args.at(-1) === '--version' ? { status: 0, stdout: 'codex-cli test' } : { status: 0, stdout: 'Usage: codex queue' }, env: { THE_WIRE_CODEX_BIN: '/x/codex' } });
+  assert.equal(noQueue.queueSupported, false);
+});
+test('codex driver: acceptance parser is exact and fail-closed', () => {
+  const thread = '22222222-2222-4222-8222-222222222222';
+  const message = '0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f';
+  assert.equal(parseQueueAcceptance(`Queued message ${message} for thread ${thread}.`, thread), message);
+  assert.equal(parseQueueAcceptance(`diagnostic: Queued message ${message} for thread ${thread}.`, thread), null);
+  assert.equal(parseQueueAcceptance(`Queued message not-a-uuid for thread ${thread}.`, thread), null);
+  assert.equal(parseQueueAcceptance(`Queued message ${message} for thread 99999999-9999-4999-8999-999999999999.`, thread), null);
 });
 test('dispatch marks accepted only when the codex driver confirms; claude pipe close is never accepted', t => {
   const p = root(t);

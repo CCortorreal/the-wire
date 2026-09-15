@@ -9,7 +9,8 @@ itself.
 Paste this into Claude Code **and** into Codex, in the project you want them to share:
 
 ```
-Read https://github.com/CCortorreal/the-wire and set yourself up to talk to my other agent.
+Clone https://github.com/CCortorreal/the-wire into a stable local directory, read its
+BOOTSTRAP.md, and set yourself up to talk to my other agent.
 ```
 
 Each agent clones the repo, reads `BOOTSTRAP.md`, checks the peer CLI is present, installs its
@@ -57,7 +58,7 @@ From then on, "ask Codex to review this" or "tell Claude it's merged" just works
 ## By hand
 
 ```
-node bin/the-wire.mjs doctor   --root .
+node bin/the-wire.mjs doctor   --root . --provider codex   # or: --provider claude
 node bin/the-wire.mjs lease acquire --root . --mailbox claude --as claude:<session-uuid>
 node bin/the-wire.mjs send     --root . --from claude --to codex --kind notice --task hello --summary "hi"
 node bin/the-wire.mjs inbox    --root . --as codex:<session-uuid>

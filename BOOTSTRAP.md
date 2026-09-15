@@ -13,19 +13,24 @@ Three things stay true throughout:
 3. **Never resend on silence.** Delivery is pull-driven; a stored message will be picked up.
 
 Every command below is `node <repo>/bin/the-wire.mjs <verb> --root <shared-root>`. `<repo>` is
-the directory this file is in. `<shared-root>` is the project directory both sessions work in —
-state lives in `<shared-root>/.wire/` (add it to `.gitignore`). If your user has not named the
-shared root, use your current working directory and say so.
+the directory this file is in. `<shared-root>` is one absolute project directory that both
+sessions can access — state lives in `<shared-root>/.wire/` (add it to `.gitignore`). The repo
+directory and the shared root are often different. If the user has not named the shared root,
+infer it only when both sessions' working directories establish the same project root; otherwise
+ask once. Two guessed roots create two disconnected wires.
 
 ## Step 1 — doctor
 
 ```
-the-wire doctor --root <shared-root>
+the-wire doctor --root <shared-root> --provider claude   # if you are Claude Code
+the-wire doctor --root <shared-root> --provider codex    # if you are Codex
 ```
 
 It reports node, the platform, whether `codex` and `claude` answer `--version`, and any existing
-leases. `ok: false` means neither CLI is present: stop and tell your user. On Windows the `codex`
-shim is resolved to its `codex.js` automatically; `THE_WIRE_CODEX_BIN` overrides it.
+leases. For Codex it also proves the installed CLI advertises `queue --thread` and `--message`.
+`ok: false` means the provider half you are installing is not ready: stop and report the hint.
+On Windows a native `codex.exe` is preferred; an npm `codex.js` entrypoint is used when present.
+`THE_WIRE_CODEX_BIN` overrides either route.
 
 ## Step 2 — install your half
 
@@ -35,11 +40,13 @@ the-wire install --provider codex      # if you are Codex
 ```
 
 This copies `skills/the-wire/SKILL.md` into your provider's skill directory and **prints** a hook
-snippet for your prompt-submit lifecycle event. Show the snippet to your user and ask them to
-merge it into the named file (Claude: `~/.claude/settings.json`; Codex: `~/.codex/hooks.json`) —
-or to approve you doing it. The hook is what makes receiving automatic: on every prompt it pulls
-your inbox and injects a short summary. **Without the hook you can still receive** by running
-`the-wire inbox --as <you>` yourself; the hook just removes the chore.
+snippet for your prompt-submit lifecycle event. Show the complete `merge` object to your user and
+ask them to merge it into the named file (Claude: `~/.claude/settings.json`; Codex:
+`~/.codex/hooks.json`) — or to approve you doing it. Both files require the printed top-level
+`hooks` object; preserve existing events and append this command to `UserPromptSubmit`. The hook
+is what makes receiving automatic: on every prompt it pulls your inbox and injects a short
+summary. **Without the hook you can still receive** by running `the-wire inbox --as <you>`
+yourself; the hook just removes the chore.
 
 A new hook loads only in a session started after it was installed. Say that to your user.
 
@@ -52,8 +59,11 @@ The wire addresses sessions as `provider:session-uuid`. You need yours.
   title if your user gave the session one). If two candidates remain, ask your user to title
   this session and re-run — do not guess. Your hook input also carries `session_id` if a hook
   has fired this session.
-- **Codex:** your thread id is in your own context and in your thread-listing tool
-  (`list_threads`). Do not read rollout files and pick the newest — that is a guess.
+- **Codex:** run `the-wire discover --root <shared-root>` first. Codex normally exposes the
+  current id to child commands as `CODEX_THREAD_ID` (with `CODEX_SESSION_ID` as a compatibility
+  fallback), and `discover` reports the validated value and its source. In Codex Desktop, use
+  the thread-listing tool to identify the current task if neither variable is present. In other
+  hosts, ask the user for the exact current id. Do not read rollout files and pick the newest.
 
 ## Step 4 — take your mailbox
 
@@ -146,11 +156,12 @@ Put decisions and pointers on the wire; put the work in the repo.
 ## If something is off
 
 - `send` says *No live lease for mailbox "codex"* → the peer has not done Step 4. Tell the user.
-- `delivery: unconfirmed` on a Codex target → run `the-wire doctor`; `codex.version` must be
-  non-null. Codex's `queue` works even when its app-server daemon socket is dead; do **not**
-  start a daemon or a second Codex session to fix it.
-- `EPERM` connecting to the Claude pipe from inside Codex's sandbox → the send needs Codex's
-  normal escalated-approval path. Ask; do not disable the sandbox.
+- `delivery: unconfirmed` on a Codex target → run `the-wire doctor --provider codex`;
+  `codex.ready` and `codex.queueSupported` must be true. Codex's `queue` has worked while its
+  app-server daemon socket was dead; do **not** start a daemon or a second Codex session to fix it.
+- An explicit `EPERM` connecting to the Claude pipe from inside Codex's Windows sandbox → ask for
+  Codex's normal escalated approval and rerun only that user-approved operation. `unconfirmed` by
+  itself is not proof of `EPERM`, and silence never authorizes a resend. Do not disable the sandbox.
 - Wire full (100 messages) → when nothing is outstanding, `the-wire archive`.
 - Protocol details and state machine: `docs/PROTOCOL.md`. What we learned the hard way:
   `docs/FIELD-NOTES.md`.

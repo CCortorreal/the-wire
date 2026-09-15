@@ -11,16 +11,17 @@ import { fileURLToPath } from 'node:url';
 import { PROVIDERS, endpoint, enqueue, get, list, receive, status, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, wireHealth, archive, pull } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
-import { codexBin } from '../lib/drivers/codex-queue.mjs';
+import { probeCodex } from '../lib/drivers/codex-queue.mjs';
 import { sweep, acquireLock, releaseLock } from '../lib/steward.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
+const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FLAGS = /^--(root|id|as|hash|state|revision|from|to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json)$/;
 const USAGE = `the-wire <verb> --root <shared-root> [flags]
 
-  doctor                                   check node, codex, claude, and the state dir
-  discover                                 list live Claude sessions (and how to find your Codex thread id)
+  doctor    [--provider claude|codex]       check provider capabilities and the state dir
+  discover                                 list live Claude sessions and this Codex session id when exposed
   install   --provider claude|codex        copy the skill into your provider's skill dir; print the hook snippet
   lease     acquire|renew|release|list     --mailbox <name> --as <provider:uuid> [--ttl ms] [--fence n]
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
@@ -73,23 +74,35 @@ try {
           : spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 10000 });
         return r.status === 0 ? (r.stdout || r.stderr).trim().split('\n')[0] : null;
       };
-      const codex = codexBin();
+      const requested = flags['--provider'];
+      if (requested && !PROVIDERS.includes(requested)) throw Error('--provider claude|codex required');
+      const codex = probeCodex();
       const stateDir = path.join(root, '.wire');
       result = {
         node: process.version, platform: process.platform, root, stateDir, stateDirExists: fs.existsSync(stateDir),
-        codex: { resolved: `${codex.cmd} ${codex.args.join(' ')}`.trim(), version: probe(codex.cmd, [...codex.args, '--version']) },
+        requestedProvider: requested || null,
+        codex: { ...codex, ready: Boolean(codex.version && codex.queueSupported) },
         claude: { version: probe('claude', ['--version']), sessionRegistry: fs.existsSync(path.join(process.env.USERPROFILE || os.homedir(), '.claude', 'sessions')) },
         leases: fs.existsSync(stateDir) ? leaseList(root) : [],
         health: fs.existsSync(path.join(stateDir, 'wire.json')) ? wireHealth(root) : null,
       };
-      result.ok = Boolean(result.codex.version || result.claude.version);
-      result.hint = result.ok ? 'At least one provider CLI is present. Next: BOOTSTRAP.md step 2.' : 'Neither `codex` nor `claude` responded to --version. Install the peer CLI or set THE_WIRE_CODEX_BIN.';
+      result.claude.ready = Boolean(result.claude.version);
+      result.ok = requested ? result[requested].ready : Boolean(result.codex.ready || result.claude.ready);
+      if (result.ok) result.hint = requested ? `${requested} is ready. Next: BOOTSTRAP.md step 2.` : 'At least one provider is ready. Use --provider claude|codex to validate the half you are installing.';
+      else if (requested === 'codex') result.hint = 'Codex must answer `--version` and expose `queue --thread ... --message ...`. Fix PATH or set THE_WIRE_CODEX_BIN, then rerun doctor.';
+      else if (requested === 'claude') result.hint = 'Claude Code did not answer `--version`. Fix PATH, then rerun doctor.';
+      else result.hint = 'Neither provider is ready. Fix PATH or set THE_WIRE_CODEX_BIN, then rerun doctor with --provider.';
       break;
     }
     case 'discover': {
+      const codexThread = SESSION_UUID.test(process.env.CODEX_THREAD_ID || '')
+        ? { sessionId: process.env.CODEX_THREAD_ID, source: 'CODEX_THREAD_ID' }
+        : SESSION_UUID.test(process.env.CODEX_SESSION_ID || '')
+          ? { sessionId: process.env.CODEX_SESSION_ID, source: 'CODEX_SESSION_ID' }
+          : null;
       result = {
         claude: discoverClaude(),
-        codex: { how: 'Codex threads are not enumerable from outside. In the Codex session, call its thread-listing tool (mcp__codex_app__list_threads) or read the thread id from its own context, then run `the-wire lease acquire --mailbox codex --as codex:<that uuid>`. Never pick the newest rollout file as a guess.' },
+        codex: codexThread || { sessionId: null, source: null, how: 'No Codex session id was exposed to this process. In Codex Desktop, call its thread-listing tool and identify the current task; otherwise ask the user for the exact current session id. Never pick the newest rollout file.' },
         note: 'titleHint is a human hint, not an identifier. Use sessionId.',
       };
       break;
@@ -104,7 +117,7 @@ try {
       const hookCmd = `node "${path.join(REPO, 'lib', 'hook.mjs').split(path.sep).join('/')}" --root "${root.split(path.sep).join('/')}" --provider ${provider}`;
       const snippet = provider === 'claude'
         ? { file: path.join(home, '.claude', 'settings.json'), merge: { hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd }] }] } } }
-        : { file: path.join(home, '.codex', 'hooks.json'), merge: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd }] }] } };
+        : { file: path.join(home, '.codex', 'hooks.json'), merge: { hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd }] }] } } };
       result = { installedSkill: skillDir, hook: snippet, next: 'the-wire does NOT edit your settings. Show the hook snippet to your user and ask them to merge it (or to approve you doing so), then restart the session so the hook loads. Verify with a canary (BOOTSTRAP.md step 5).' };
       break;
     }
