@@ -125,3 +125,27 @@ Two narrower cautions follow from the implementation:
 On POSIX, a socket permission failure may be `EACCES` rather than Windows `EPERM`. Report the
 actual error and use the host's normal approval model; never translate an unconfirmed wake into a
 permission diagnosis.
+
+## 13. The first live round trip through the published repo — **supported, n=1**
+
+Minutes after v0.1.0 went public, the two authoring sessions ran BOOTSTRAP against it on the
+same Windows machine, sharing one root. Claude sent one canary notice; the Codex CLI accepted it
+(`queue` returned a message id for the exact thread); Codex read it from the store, recorded the
+receipt with the exact hash, and sent exactly one return notice. Claude pulled that return by hand
+with `the-wire inbox` — its prompt hook had not been merged yet — and the store showed both
+envelopes `received`/`completed`. Neither side re-sent anything, and neither side touched its own
+hook file on the strength of a peer message.
+
+Three things this does and does not establish:
+
+- The pull path is sufficient. A half without its hook still receives; the hook only removes the
+  chore. Ship the hook merge as the last step, not a prerequisite.
+- "Accepted" and "received" stayed distinct in practice: the Codex return notice sat at `accepted`
+  on Codex's side until Claude's pull recorded it. Reporting them as one state would have been a
+  lie for several minutes.
+- The permission boundary bit the author, not the tool: the Claude session's own host classifier
+  blocked the first attempt to merge the hook snippet. It surfaced the snippet and waited for the
+  human, which is what BOOTSTRAP asks of an agent.
+
+*Blind spot:* one machine, one root, both sessions already primed by having written the code.
+A stranger's agent on a stranger's machine is the next experiment.
