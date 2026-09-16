@@ -160,8 +160,9 @@ failure mode is silent: the reply routes successfully, just to the wrong session
 
 Mitigation: `--in-reply-to <message-id>` on `send` reads the original message and auto-routes
 to its sender's exact endpoint. No bare-mailbox resolution, no cross-wire. The flag also
-inherits `--task` from the original message, reducing required flags for a reply to just
-`--from`, `--kind`, and `--summary`.
+inherits `--task` and `--revision` from the original message, reducing required flags for a
+reply to just `--from`, `--kind`, and `--summary`. Only the original recipient can use
+`--in-reply-to` (third-party replies are rejected).
 
 ## 15. Dead sessions block lease acquisition — **established (fixed)**
 
@@ -170,9 +171,24 @@ for up to 30 minutes. A new session trying to acquire the same mailbox gets
 `"already has a live lease"` and must manually release with the dead session's fence token —
 a multi-step process requiring the operator to read the lease list.
 
-Fix: `leaseAcquire` calls `holderAlive(endpoint)`, which reads the specific holder's registry
-record from `~/.claude/sessions/<pid>.json` by matching `sessionId`, validates that the
-filename PID matches the JSON `pid` field, then probes with `process.kill(pid, 0)`. ESRCH =
-dead = evict. Safe defaults: no registry, no matching record, PID/filename mismatch, or
-multiple matches all return "alive" (no false eviction). Codex-held leases are not
-auto-evicted (no equivalent liveness probe).
+Fix: `leaseAcquire` calls `holderLiveness(endpoint)`, which reads the specific holder's
+registry record from `~/.claude/sessions/<pid>.json` by matching `sessionId`, validates that
+the filename PID matches the JSON `pid` field, then probes with `process.kill(pid, 0)`.
+Returns a tri-state: `alive` (probe succeeded), `dead` (ESRCH), `unknown` (no registry, no
+matching record, PID/filename mismatch, multiple matches, or non-Claude provider). Eviction
+fires only on `dead`; `unknown` blocks eviction (no false eviction).
+
+## 16. Expired leases make idle sessions unreachable — **established (fixed)**
+
+A session that goes idle for 30 minutes (the lease TTL) loses its mailbox — `leaseResolve`
+returns null, and `--to codex` (bare mailbox) fails even though the session is alive and
+capable of receiving work. The workaround was knowing and typing the full endpoint UUID,
+which defeats the purpose of named mailboxes.
+
+Fix: `holderLiveness(endpoint)` returns a tri-state: `alive` (PID probe succeeded), `dead`
+(ESRCH), or `unknown` (no probe — Codex, missing registry, ambiguous records). `leaseResolve`
+resolves expired leases only when the holder is **proven alive** — unknown holders do not
+self-heal. `leaseList` reports `active` / `stale` (expired + alive) / `expired` (expired +
+dead or unknown). Stale leases resolve for addressing but can be freely taken over by
+`leaseAcquire` — expiry gates takeover, not resolution. Eviction in `leaseAcquire` fires
+only on `dead`, never on `unknown` — same fail-safe as before.

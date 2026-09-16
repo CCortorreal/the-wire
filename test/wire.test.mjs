@@ -233,12 +233,35 @@ test('leases: one live owner per mailbox, fenced renew/release, expiry permits t
   assert.throws(() => leaseRenew(p, 'claude', l.fence + 1, 200), /stale/);
   leaseRenew(p, 'claude', l.fence, 200);
   await new Promise(r => setTimeout(r, 250));
-  assert.equal(leaseResolve(p, 'claude'), null);
+  assert.equal(leaseResolve(p, 'claude'), null, 'unknown holder does not resolve after expiry');
   assert.equal(leaseList(p)[0].status, 'expired');
+  // stale lease can be taken over without eviction
   const l2 = leaseAcquire(p, 'claude', 'claude:44444444-4444-4444-8444-444444444444', [], 200);
   assert.equal(l2.fence, l.fence + 1);
   assert.throws(() => leaseRelease(p, 'claude', l.fence), /stale/);
   leaseRelease(p, 'claude', l2.fence); assert.equal(leaseList(p).length, 0);
+});
+test('leases: expired lease resolves when holder proven alive (self-healing)', async t => {
+  const p = root(t);
+  const alivePid = process.pid; // this process is alive
+  const aliveSession = '88888888-8888-4888-8888-888888888888';
+  const aliveEndpoint = `claude:${aliveSession}`;
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'wire-test-'));
+  const sessDir = path.join(tmpHome, '.claude', 'sessions');
+  const origProfile = process.env.USERPROFILE;
+  process.env.USERPROFILE = tmpHome;
+  t.after(() => { if (origProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = origProfile; fs.rmSync(tmpHome, { recursive: true, force: true }); });
+  fs.mkdirSync(sessDir, { recursive: true });
+  fs.writeFileSync(path.join(sessDir, `${alivePid}.json`), JSON.stringify({ pid: alivePid, sessionId: aliveSession, cwd: p }));
+  const l = leaseAcquire(p, 'claude', aliveEndpoint, ['pull'], 200);
+  assert.equal(leaseResolve(p, 'claude'), aliveEndpoint);
+  await new Promise(r => setTimeout(r, 250));
+  // Lease expired by TTL, but holder is proven alive — still resolves
+  assert.equal(leaseResolve(p, 'claude'), aliveEndpoint, 'expired+alive resolves (self-healing)');
+  assert.equal(leaseList(p)[0].status, 'stale', 'status is stale, not expired');
+  // Stale lease can still be taken over
+  const l2 = leaseAcquire(p, 'claude', 'claude:99999999-9999-4999-8999-999999999999', [], 60000);
+  assert.equal(l2.fence, l.fence + 1, 'stale lease permits takeover');
 });
 test('leases: dead-process holder is auto-evicted on acquire', t => {
   const p = root(t);
@@ -795,7 +818,7 @@ test('session replacement: new session takes over mailbox but cannot read predec
 
   // CodexV1 dies — lease expires
   await new Promise(ok => setTimeout(ok, 250));
-  assert.equal(leaseResolve(r, 'codex'), null, 'codexV1 lease expired');
+  assert.equal(leaseResolve(r, 'codex'), null, 'expired codex lease does not resolve (no liveness probe)');
 
   // CodexV2 takes over the mailbox
   leaseAcquire(r, 'codex', codexV2, ['pull', 'context'], 60000);
