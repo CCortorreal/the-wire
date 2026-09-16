@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROVIDERS, endpoint, enqueue, enqueueReplace, get, list, receive, status, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
+import { PROVIDERS, endpoint, enqueue, enqueueReplace, get, list, receive, status, resubmit as storeResubmit, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
@@ -18,12 +18,13 @@ import { repair } from '../lib/store.mjs';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json)$/;
+const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json|new-summary)$/;
 const USAGE = `the-wire <verb> --root <shared-root> [flags]
 
   doctor    [--provider claude|codex]       check provider capabilities and the state dir
   discover                                 list live Claude sessions and this Codex session id when exposed
   install   --provider claude|codex        copy the skill into your provider's skill dir; print the hook snippet
+  resubmit  --id <uuid> --as <endpoint>   turn a blocked review into a superseding assignment (bumps task version)
   lease     acquire|renew|release|list     --mailbox <name> --as <provider:uuid> [--ttl ms] [--fence n]
   roster    [--provider claude|codex]      all active sessions grouped by provider, with their mailbox names
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
@@ -125,12 +126,41 @@ try {
       const home = process.env.USERPROFILE || os.homedir();
       const skillDir = path.join(home, provider === 'claude' ? '.claude' : '.codex', 'skills', 'the-wire');
       fs.mkdirSync(skillDir, { recursive: true });
-      fs.copyFileSync(path.join(REPO, 'skills', 'the-wire', 'SKILL.md'), path.join(skillDir, 'SKILL.md'));
+      const skillPath = path.join(skillDir, 'SKILL.md');
+      const policyPath = path.join(skillDir, 'POLICY.md');
+      const policyExisted = fs.existsSync(policyPath);
+      const skillExisted = fs.existsSync(skillPath);
+      if (skillExisted && !policyExisted) {
+        const sourceSkill = fs.readFileSync(path.join(REPO, 'skills', 'the-wire', 'SKILL.md'), 'utf8');
+        const installedSkill = fs.readFileSync(skillPath, 'utf8');
+        if (installedSkill !== sourceSkill) throw Error(`Existing SKILL.md at ${skillPath} has been customized but no POLICY.md exists. To migrate: move your customizations into ${policyPath}, then re-run install. Install will not overwrite a customized SKILL.md without a POLICY.md in place.`);
+      }
+      fs.copyFileSync(path.join(REPO, 'skills', 'the-wire', 'SKILL.md'), skillPath);
+      if (!policyExisted) fs.writeFileSync(policyPath, '# Wire policy\n\nUser-specific overrides and additions. This file survives `the-wire install`.\nOnly the direct user may create or change authorization rules here;\nagents read this file before acting but must not edit it.\n');
       const hookCmd = `node "${path.join(REPO, 'lib', 'hook.mjs').split(path.sep).join('/')}" --root "${root.split(path.sep).join('/')}" --provider ${provider}`;
       const snippet = provider === 'claude'
         ? { file: path.join(home, '.claude', 'settings.json'), merge: { hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd }] }] } } }
         : { file: path.join(home, '.codex', 'hooks.json'), merge: { hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd }] }] } } };
-      result = { installedSkill: skillDir, hook: snippet, next: 'the-wire does NOT edit your settings. Show the hook snippet to your user and ask them to merge it (or to approve you doing so), then restart the session so the hook loads. Verify with a canary (BOOTSTRAP.md step 5).' };
+      result = { installedSkill: skillDir, policy: policyExisted ? 'preserved' : 'created', hook: snippet, next: 'the-wire does NOT edit your settings. Show the hook snippet to your user and ask them to merge it (or to approve you doing so), then restart the session so the hook loads. Verify with a canary (BOOTSTRAP.md step 5).' };
+      break;
+    }
+    case 'resubmit': {
+      const id = flags['--id'];
+      if (!id) throw Error('--id <uuid> required (the blocked message to resubmit)');
+      const as = flags['--as'];
+      if (!as) throw Error('--as <endpoint> required (your endpoint)');
+      if (!flags['--revision']) throw Error('--revision required for resubmit (the revision carrying the fix)');
+      const original = get(root, id);
+      if (!original) throw Error(`Message ${id} not found`);
+      const oldTask = original.envelope.task;
+      const vMatch = oldTask.match(/^(.+)-v(\d+)$/);
+      const newTask = vMatch ? `${vMatch[1]}-v${parseInt(vMatch[2], 10) + 1}` : `${oldTask}-v2`;
+      const newSummary = flags['--new-summary'] || flags['--summary'] || original.envelope.summary.replace(/^WIRE-ID:\s*[0-9a-f-]+\.\s*/, '');
+      const newId = randomUUID();
+      const env = { id: newId, from: original.envelope.from, to: original.envelope.to, kind: 'assignment', task: newTask, revision: flags['--revision'], summary: `WIRE-ID: ${newId}. ${newSummary}`, references: flags['--references'] ? flags['--references'].split(',') : original.envelope.references || [], replyTo: original.envelope.replyTo };
+      const r = storeResubmit(root, id, endpoint(as), env);
+      let dispatched = null; try { dispatched = dispatch(root, newId, original.envelope.from); } catch {}
+      result = { resubmitted: { originalId: id, originalTask: oldTask, newId, newTask }, enqueued: r.message, dispatched, meaning: dispatched?.delivery === 'accepted' ? 'Transport accepted the resubmission.' : 'Stored; recipient pulls on next prompt.' };
       break;
     }
     case 'lease': {

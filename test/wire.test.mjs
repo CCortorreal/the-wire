@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto, { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { enqueue, enqueueReplace, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, status, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
+import { enqueue, enqueueReplace, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, status, resubmit as storeResubmit, observePrompt, context, notification, wireHealth, archive, endpoint, WIRE_CAPACITY } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { wake as codexWake, codexBin, probeCodex, parseQueueAcceptance } from '../lib/drivers/codex-queue.mjs';
 import { sweep } from '../lib/steward.mjs';
@@ -963,4 +963,142 @@ test('concurrent senders: two Claude sessions cannot both assign to the same Cod
   status(r, a2.envelope.id, codex, 'completed', 'abc123', 'Done', []);
   const b1 = enqueue(r, msg({ from: claudeB, to: codex, task: 'build-b', summary: 'From B finally' }));
   assert.equal(b1.envelope.from, claudeB);
+});
+
+test('install preserves existing POLICY.md and creates stub when absent', (t) => {
+  const r = root(t);
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'wire-install-'));
+  t.after(() => fs.rmSync(tmpHome, { recursive: true, force: true }));
+  const origProfile = process.env.USERPROFILE;
+  process.env.USERPROFILE = tmpHome;
+  t.after(() => { if (origProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = origProfile; });
+  // First install — creates POLICY.md stub
+  const r1 = spawnSync(process.execPath, [CLI, 'install', '--provider', 'claude', '--root', r], { encoding: 'utf8' });
+  assert.equal(r1.status, 0, r1.stderr);
+  const out1 = JSON.parse(r1.stdout);
+  assert.equal(out1.policy, 'created');
+  const skillDir = path.join(tmpHome, '.claude', 'skills', 'the-wire');
+  const policyPath = path.join(skillDir, 'POLICY.md');
+  assert.ok(fs.existsSync(policyPath), 'POLICY.md exists after install');
+  assert.match(fs.readFileSync(policyPath, 'utf8'), /survives/);
+  // Write user customization to POLICY.md
+  fs.writeFileSync(policyPath, '# My policy\nCustom rule: always use --revision.\n');
+  // Reinstall — POLICY.md preserved, SKILL.md updated
+  const r2 = spawnSync(process.execPath, [CLI, 'install', '--provider', 'claude', '--root', r], { encoding: 'utf8' });
+  assert.equal(r2.status, 0, r2.stderr);
+  const out2 = JSON.parse(r2.stdout);
+  assert.equal(out2.policy, 'preserved');
+  assert.match(fs.readFileSync(policyPath, 'utf8'), /Custom rule/, 'user policy survived reinstall');
+  assert.match(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'), /the-wire/, 'SKILL.md was refreshed');
+  // Migration safety: customized SKILL + no POLICY → refuse
+  const tmpHome2 = fs.mkdtempSync(path.join(os.tmpdir(), 'wire-migrate-'));
+  t.after(() => fs.rmSync(tmpHome2, { recursive: true, force: true }));
+  process.env.USERPROFILE = tmpHome2;
+  const migrateDir = path.join(tmpHome2, '.claude', 'skills', 'the-wire');
+  fs.mkdirSync(migrateDir, { recursive: true });
+  fs.writeFileSync(path.join(migrateDir, 'SKILL.md'), '# customized skill with standing authorization\n');
+  const r3 = spawnSync(process.execPath, [CLI, 'install', '--provider', 'claude', '--root', r], { encoding: 'utf8' });
+  assert.equal(r3.status, 1, 'install must refuse when SKILL is customized and no POLICY exists');
+  assert.match(r3.stderr, /customized/, 'error explains the migration issue');
+  assert.ok(fs.existsSync(path.join(migrateDir, 'SKILL.md')), 'customized SKILL.md was not overwritten');
+  assert.ok(!fs.existsSync(path.join(migrateDir, 'POLICY.md')), 'no POLICY.md was created');
+});
+
+test('CLI resubmit requires blocked state, explicit revision, and only original sender', (t) => {
+  const r = root(t);
+  leaseAcquire(r, 'claude', from, ['pull', 'context'], 60000);
+  leaseAcquire(r, 'codex', to, ['pull', 'context'], 60000);
+  const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', r], { encoding: 'utf8' });
+  // Send initial assignment
+  const s1 = run('send', '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--task', 'review-work', '--summary', 'Please review', '--revision', 'abc');
+  assert.equal(s1.status, 0, s1.stderr);
+  const origId = JSON.parse(s1.stdout).enqueued.envelope.id;
+  // Cannot resubmit without --revision
+  const noRev = run('resubmit', '--id', origId, '--as', from, '--new-summary', 'fix');
+  assert.equal(noRev.status, 1, 'missing --revision must fail');
+  assert.match(noRev.stderr, /--revision required/);
+  // Cannot resubmit non-blocked assignment (still queued)
+  const notBlocked = run('resubmit', '--id', origId, '--as', from, '--revision', 'def', '--new-summary', 'fix');
+  assert.equal(notBlocked.status, 1, 'non-blocked resubmit must fail');
+  assert.match(notBlocked.stderr, /not "blocked"/);
+  // Block the assignment via recipient
+  pull(r, to);
+  const detail = JSON.stringify({ summary: 'BLOCK: needs fix', references: [] });
+  const blockResult = spawnSync(process.execPath, [CLI, 'status', '--id', origId, '--as', to, '--state', 'blocked', '--revision', 'abc', '--root', r], { input: detail, encoding: 'utf8' });
+  assert.equal(blockResult.status, 0, blockResult.stderr);
+  // Now resubmit succeeds
+  const r1 = run('resubmit', '--id', origId, '--as', from, '--revision', 'def', '--new-summary', 'Addressed feedback');
+  assert.equal(r1.status, 0, r1.stderr);
+  const out = JSON.parse(r1.stdout);
+  assert.equal(out.resubmitted.originalTask, 'review-work');
+  assert.equal(out.resubmitted.newTask, 'review-work-v2');
+  assert.equal(get(r, origId).work, 'cancelled', 'original is cancelled by resubmit');
+  // Block again for v3 test
+  pull(r, to);
+  const blockR2 = spawnSync(process.execPath, [CLI, 'status', '--id', out.resubmitted.newId, '--as', to, '--state', 'blocked', '--revision', 'def', '--root', r], { input: detail, encoding: 'utf8' });
+  assert.equal(blockR2.status, 0, blockR2.stderr);
+  const r2 = run('resubmit', '--id', out.resubmitted.newId, '--as', from, '--revision', 'ghi', '--new-summary', 'Round 3');
+  assert.equal(r2.status, 0, r2.stderr);
+  const out2 = JSON.parse(r2.stdout);
+  assert.equal(out2.resubmitted.newTask, 'review-work-v3');
+  // Non-sender cannot resubmit
+  pull(r, to);
+  const blockR3 = spawnSync(process.execPath, [CLI, 'status', '--id', out2.resubmitted.newId, '--as', to, '--state', 'blocked', '--revision', 'ghi', '--root', r], { input: detail, encoding: 'utf8' });
+  assert.equal(blockR3.status, 0, blockR3.stderr);
+  const r3 = run('resubmit', '--id', out2.resubmitted.newId, '--as', to, '--revision', 'jkl');
+  assert.equal(r3.status, 1, 'non-sender resubmit must fail');
+  assert.match(r3.stderr, /Only the original sender/);
+});
+
+test('resubmit is atomic: at capacity, original stays blocked if insert would fail', (t) => {
+  const r = root(t);
+  // Fill wire to capacity - 2 with notices (leave room for assignment + block notice)
+  for (let i = 0; i < WIRE_CAPACITY - 2; i++) {
+    enqueue(r, msg({ id: randomUUID(), kind: 'notice', summary: `filler ${i}` }));
+  }
+  // Message 99: the assignment
+  const a = enqueue(r, msg({ task: 'capacity-test' }));
+  assert.equal(wireHealth(r).remaining, 1, 'one slot left');
+  receive(r, a.envelope.id, to, a.hash);
+  // status(blocked) inserts a return notice → message 100 → at capacity
+  status(r, a.envelope.id, to, 'blocked', 'abc123', 'BLOCK: needs fix', []);
+  assert.equal(wireHealth(r).remaining, 0, 'wire is at capacity after block notice');
+  // Resubmit at capacity — must fail atomically (no room for replacement)
+  assert.throws(
+    () => storeResubmit(r, a.envelope.id, from, { id: randomUUID(), from, to, kind: 'assignment', task: 'capacity-test-v2', revision: 'def', summary: 'fixed', references: [] }),
+    /capacity/i
+  );
+  // Original must still be blocked — not cancelled
+  assert.equal(get(r, a.envelope.id).work, 'blocked', 'original stays blocked on failed resubmit');
+});
+
+test('resubmit rejects non-blocked and wrong-sender at store level', (t) => {
+  const r = root(t);
+  const a = enqueue(r, msg({ task: 'gate-test' }));
+  const newEnv = { id: randomUUID(), from, to, kind: 'assignment', task: 'gate-test-v2', revision: 'def', summary: 'fix', references: [] };
+  // Not blocked yet (work=queued)
+  assert.throws(() => storeResubmit(r, a.envelope.id, from, newEnv), /not "blocked"/);
+  // Block it
+  receive(r, a.envelope.id, to, a.hash);
+  status(r, a.envelope.id, to, 'blocked', 'abc123', 'BLOCK', []);
+  // Wrong sender
+  assert.throws(() => storeResubmit(r, a.envelope.id, to, newEnv), /Only the original sender/);
+});
+
+test('resubmit canonicalizes from/to/kind from source — mismatched parties ignored', (t) => {
+  const r = root(t);
+  const a = enqueue(r, msg({ task: 'canon-test' }));
+  receive(r, a.envelope.id, to, a.hash);
+  status(r, a.envelope.id, to, 'blocked', 'abc123', 'BLOCK', []);
+  const bogusFrom = 'claude:cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const bogusTo = 'codex:dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const newId = randomUUID();
+  // Pass mismatched from/to/kind — resubmit must override them with source values
+  const result = storeResubmit(r, a.envelope.id, from, {
+    id: newId, from: bogusFrom, to: bogusTo, kind: 'notice', task: 'canon-test-v2', revision: 'def', summary: 'fixed', references: []
+  });
+  assert.equal(result.message.envelope.from, from, 'from canonicalized to source sender');
+  assert.equal(result.message.envelope.to, to, 'to canonicalized to source recipient');
+  assert.equal(result.message.envelope.kind, 'assignment', 'kind canonicalized to assignment');
+  assert.equal(get(r, a.envelope.id).work, 'cancelled', 'source cancelled');
 });
