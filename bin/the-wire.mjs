@@ -13,6 +13,7 @@ import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
 import { sweep, acquireLock, releaseLock } from '../lib/steward.mjs';
+import { repair } from '../lib/store.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
@@ -36,6 +37,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   status    --id <uuid> --as <endpoint> --state working|blocked|completed|cancelled --revision <rev>
             ({"summary":"...","references":[...]} on stdin)
   health
+  repair                                   fix stale locks, orphaned temps, restore corrupt state from backup
   archive
   steward                                  one background sweep (dispatch pending, re-wake unconfirmed)
 
@@ -207,6 +209,7 @@ try {
       break;
     }
     case 'health': result = wireHealth(root); break;
+    case 'repair': result = repair(root); break;
     case 'archive': result = archive(root); break;
     case 'steward': {
       if (!acquireLock(root)) { result = { skipped: 'another sweep holds the lock' }; break; }

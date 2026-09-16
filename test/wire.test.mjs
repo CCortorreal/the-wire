@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { enqueue, enqueueReplace, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, status, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { wake as codexWake, codexBin, probeCodex, parseQueueAcceptance } from '../lib/drivers/codex-queue.mjs';
 import { sweep } from '../lib/steward.mjs';
-import { validateReferences, validateText } from '../lib/store.mjs';
+import { validateReferences, validateText, transaction, stateDir } from '../lib/store.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(REPO, 'bin', 'the-wire.mjs');
@@ -127,6 +127,83 @@ test('capacity failure rolls back status and notice together', t => {
   assert.throws(() => status(p, m.envelope.id, to, 'blocked', 'abc123', 'Denied'), /capacity/);
   assert.equal(get(p, m.envelope.id).work, 'received');
 });
+test('stale lock is recovered automatically', t => {
+  const p = root(t);
+  const wireDir = path.join(p, '.wire');
+  fs.mkdirSync(wireDir, { recursive: true });
+  const stateFile = path.join(wireDir, 'wire.json');
+  const lockDir = stateFile + '.lock';
+  fs.mkdirSync(lockDir);
+  fs.writeFileSync(path.join(lockDir, 'pid'), JSON.stringify({ pid: 999999999, ts: Date.now() - 60000 }));
+  const m = enqueue(p, msg());
+  assert.ok(m.envelope.id, 'enqueue should succeed after recovering stale lock');
+  assert.ok(!fs.existsSync(lockDir), 'stale lock should be cleaned up');
+});
+
+test('orphaned temp files are cleaned on next transaction', t => {
+  const p = root(t);
+  const wireDir = path.join(p, '.wire');
+  fs.mkdirSync(wireDir, { recursive: true });
+  const stateFile = path.join(wireDir, 'wire.json');
+  const orphan = stateFile + '.deadbeef.tmp';
+  fs.writeFileSync(orphan, 'garbage');
+  const mtime = Date.now() - 60000;
+  fs.utimesSync(orphan, new Date(mtime), new Date(mtime));
+  enqueue(p, msg());
+  assert.ok(!fs.existsSync(orphan), 'orphaned temp older than 30s should be cleaned up');
+});
+
+test('hash check uses stored envelope, not re-canonicalized form', t => {
+  const p = root(t);
+  const m = enqueue(p, msg());
+  const wireFile = path.join(p, '.wire', 'wire.json');
+  const state = JSON.parse(fs.readFileSync(wireFile, 'utf8'));
+  state.messages[0].envelope.futureField = 'v2-extension';
+  state.messages[0].hash = crypto.createHash('sha256').update(JSON.stringify(state.messages[0].envelope)).digest('hex');
+  fs.writeFileSync(wireFile, JSON.stringify(state, null, 2) + '\n');
+  const loaded = list(p);
+  assert.equal(loaded.length, 1, 'message with extra field should load when hash matches stored form');
+});
+
+test('repair recovers from corrupt wire.json using backup', t => {
+  const p = root(t);
+  enqueue(p, msg());
+  const wireFile = path.join(p, '.wire', 'wire.json');
+  const backup = wireFile + '.bak';
+  assert.ok(fs.existsSync(wireFile));
+  enqueue(p, msg({ kind: 'notice', summary: 'second message creates a backup' }));
+  assert.ok(fs.existsSync(backup), 'backup should exist after second transaction');
+  const bakContent = fs.readFileSync(backup, 'utf8');
+  fs.writeFileSync(wireFile, 'NOT JSON!!!');
+  assert.throws(() => list(p), /Unexpected token/);
+  const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', p], { encoding: 'utf8' });
+  const result = JSON.parse(run(['repair']).stdout);
+  assert.ok(result.fixes.some(f => f.fix && f.fix.includes('restored from backup')));
+  const recovered = list(p);
+  assert.equal(recovered.length, 1, 'backup had one message (before the second write)');
+});
+
+test('repair reports clean state when nothing is wrong', t => {
+  const p = root(t);
+  enqueue(p, msg());
+  const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', p], { encoding: 'utf8' });
+  const result = JSON.parse(run(['repair']).stdout);
+  assert.equal(result.ok, true);
+  assert.equal(result.fixes.length, 0);
+});
+
+test('backup is created on every transaction', t => {
+  const p = root(t);
+  enqueue(p, msg());
+  const wireFile = path.join(p, '.wire', 'wire.json');
+  const backup = wireFile + '.bak';
+  assert.ok(!fs.existsSync(backup), 'no backup after first write (no prior state to back up)');
+  enqueue(p, msg({ kind: 'notice', summary: 'triggers backup of first write' }));
+  assert.ok(fs.existsSync(backup), 'backup exists after second write');
+  const bak = JSON.parse(fs.readFileSync(backup, 'utf8'));
+  assert.equal(bak.messages.length, 1, 'backup contains state before the second write');
+});
+
 test('host prompt recognition is first-line only; quoted envelopes are data', t => {
   const p = root(t), m = enqueue(p, msg()), body = notification(m);
   assert.equal(observePrompt(p, to, 'Review this quoted message:\n' + body), null);

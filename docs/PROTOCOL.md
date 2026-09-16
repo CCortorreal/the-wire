@@ -168,6 +168,34 @@ The active-assignment error now includes the blocking message's ID and task so t
 choose: `--supersedes <id>` for same-task replacement, `--supersedes auto` for cross-task
 replacement, or cancel + re-send manually.
 
+## Durability and recovery
+
+Every state mutation (wire.json, leases.json, cursors.json) goes through a single transaction
+primitive: mkdir-lock → read → update → write temp → fsync → backup → rename → rmdir. A crash
+leaves either the old file or the new one, never a torn one.
+
+**Stale lock recovery:** the lock directory contains a `pid` sentinel (PID + timestamp). On
+contention, if the holder's PID is dead or the lock is older than 30 seconds, the lock is broken
+automatically. Four retries with backoff (50/100/200/500ms) handle transient contention from
+concurrent hooks.
+
+**Backup before write:** every transaction copies the current state to `.bak` before the rename.
+If the primary file becomes corrupt (truncated, invalid JSON), `the-wire repair` restores from
+the backup. The corrupt file is preserved as `.corrupt.<timestamp>` for forensics.
+
+**Orphaned temp cleanup:** `.tmp` files older than 30 seconds are cleaned at the start of every
+transaction. A crash after writeFileSync but before rename leaves a temp file; it is harmless and
+cleaned on the next operation.
+
+**Hash stability:** the integrity check hashes the stored envelope verbatim (`digest(m.envelope)`)
+rather than re-canonicalizing through `envelope()`. This means adding new optional fields to the
+envelope schema never breaks existing messages. The hash was computed at insert time over the
+canonical form; at load time, the stored form IS the canonical form from that version.
+
+**Repair verb:** `the-wire repair` fixes stale locks, orphaned temps, corrupt-to-backup recovery,
+and reports hash mismatches (tampered messages). It does not modify messages or leases beyond
+recovery. Run it when any operation fails with a persistent error.
+
 ## Verification status
 
 - Broker semantics (dedupe, supersession, attempt claim, receipt precedence, atomic notices,
