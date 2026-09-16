@@ -149,6 +149,15 @@ the-wire send --root <shared-root> --from <you> --to <peer> --kind assignment --
   --revision <commit-or-artifact-version> --summary "<what, on which exact revision, done-when>"
 ```
 
+To reply to a specific message (avoids bare-mailbox cross-wiring in multi-session setups):
+```
+the-wire send --root <shared-root> --from <you> --in-reply-to <message-id> --kind notice \
+  --summary "<reply text>"
+```
+`--in-reply-to` reads the original message and auto-routes to its sender's exact endpoint.
+It also inherits `--task` and `--revision` from the original, so only `--from`, `--kind`,
+and `--summary` are required.
+
 Summaries are curated text (≤1200 chars, ≤1000 for status), never raw files or secrets; the CLI
 refuses obvious credential shapes. `--references` are relative paths inside the shared root.
 Put decisions and pointers on the wire; put the work in the repo.

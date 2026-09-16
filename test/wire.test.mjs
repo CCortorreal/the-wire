@@ -227,6 +227,7 @@ test('leases: one live owner per mailbox, fenced renew/release, expiry permits t
   const p = root(t);
   const l = leaseAcquire(p, 'claude', to, ['pull'], 200);
   assert.equal(leaseResolve(p, 'claude'), to);
+  // Unknown holder (no registry record) is assumed alive — safe default
   assert.throws(() => leaseAcquire(p, 'claude', 'claude:44444444-4444-4444-8444-444444444444', [], 200), /live lease/);
   assert.equal(leaseAcquire(p, 'claude', to, [], 200).fence, l.fence, 'same owner re-acquire is a renew');
   assert.throws(() => leaseRenew(p, 'claude', l.fence + 1, 200), /stale/);
@@ -238,6 +239,27 @@ test('leases: one live owner per mailbox, fenced renew/release, expiry permits t
   assert.equal(l2.fence, l.fence + 1);
   assert.throws(() => leaseRelease(p, 'claude', l.fence), /stale/);
   leaseRelease(p, 'claude', l2.fence); assert.equal(leaseList(p).length, 0);
+});
+test('leases: dead-process holder is auto-evicted on acquire', t => {
+  const p = root(t);
+  const deadPid = 99999;
+  const deadSession = '66666666-6666-4666-8666-666666666666';
+  const deadEndpoint = `claude:${deadSession}`;
+  // Use a temp USERPROFILE so we never touch the real session registry
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'wire-test-'));
+  const sessDir = path.join(tmpHome, '.claude', 'sessions');
+  const origProfile = process.env.USERPROFILE;
+  process.env.USERPROFILE = tmpHome;
+  t.after(() => { if (origProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = origProfile; fs.rmSync(tmpHome, { recursive: true, force: true }); });
+  fs.mkdirSync(sessDir, { recursive: true });
+  fs.writeFileSync(path.join(sessDir, `${deadPid}.json`), JSON.stringify({ pid: deadPid, sessionId: deadSession, cwd: p }));
+  // Holder with that dead PID gets a lease
+  const l = leaseAcquire(p, 'claude', deadEndpoint, ['pull'], 60000);
+  // A new session can evict the dead holder
+  const newEndpoint = 'claude:77777777-7777-4777-8777-777777777777';
+  const evicted = leaseAcquire(p, 'claude', newEndpoint, [], 60000);
+  assert.equal(evicted.fence, l.fence + 1, 'dead holder evicted; fence advances');
+  assert.equal(leaseResolve(p, 'claude'), newEndpoint);
 });
 test('codex driver: accepts only exit 0 + a queued id for the exact thread; env override works', t => {
   const p = root(t), thread = '22222222-2222-4222-8222-222222222222';
@@ -540,6 +562,30 @@ test('CLI send --supersedes auto replaces active assignment without knowing its 
   assert.ok(result.replaced);
   assert.equal(result.replaced.id, id1);
   assert.equal(get(r, id1).work, 'cancelled');
+});
+
+test('CLI send --in-reply-to auto-routes to the original sender endpoint and inherits revision', t => {
+  const r = root(t);
+  const desk = 'claude:11111111-1111-4111-8111-111111111111';
+  const mc   = 'claude:22222222-2222-4222-8222-222222222222';
+  const cx   = 'codex:33333333-3333-4333-8333-333333333333';
+  leaseAcquire(r, 'claude.desk', desk, ['pull'], 60000);
+  leaseAcquire(r, 'claude.minecraft', mc, ['pull'], 60000);
+  leaseAcquire(r, 'codex.minecraft', cx, ['pull'], 60000);
+  const cli = (args) => { const res = spawnSync(process.execPath, [CLI, ...args, '--root', r], { encoding: 'utf8' }); return res; };
+  const sent = JSON.parse(cli(['send', '--from', 'codex.minecraft', '--to', 'claude.minecraft', '--kind', 'notice', '--task', 'canary', '--summary', 'CANARY hello', '--revision', 'abc']).stdout);
+  const reply = JSON.parse(cli(['send', '--from', 'claude.minecraft', '--in-reply-to', sent.enqueued.envelope.id, '--kind', 'notice', '--summary', 'CANARY reply']).stdout);
+  assert.equal(reply.enqueued.envelope.to, cx, '--in-reply-to routes to original sender endpoint');
+  assert.equal(reply.enqueued.envelope.task, 'canary', '--in-reply-to inherits task');
+  assert.equal(reply.enqueued.envelope.revision, 'abc', '--in-reply-to inherits revision');
+  // --to and --in-reply-to are mutually exclusive
+  const conflict = cli(['send', '--from', 'claude.minecraft', '--to', 'claude.desk', '--in-reply-to', sent.enqueued.envelope.id, '--kind', 'notice', '--task', 'x', '--summary', 'bad']);
+  assert.equal(conflict.status, 1, '--to with --in-reply-to must fail');
+  assert.match(conflict.stderr, /mutually exclusive/);
+  // only the original recipient can use --in-reply-to
+  const thirdParty = cli(['send', '--from', 'claude.desk', '--in-reply-to', sent.enqueued.envelope.id, '--kind', 'notice', '--summary', 'impostor reply']);
+  assert.equal(thirdParty.status, 1, 'third-party --in-reply-to must fail');
+  assert.match(thirdParty.stderr, /only the original recipient/);
 });
 
 test('error messages include the message ID for diagnostics', t => {

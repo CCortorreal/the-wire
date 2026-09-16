@@ -18,7 +18,7 @@ import { repair } from '../lib/store.mjs';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json)$/;
+const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json)$/;
 const USAGE = `the-wire <verb> --root <shared-root> [flags]
 
   doctor    [--provider claude|codex]       check provider capabilities and the state dir
@@ -27,7 +27,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   lease     acquire|renew|release|list     --mailbox <name> --as <provider:uuid> [--ttl ms] [--fence n]
   roster    [--provider claude|codex]      all active sessions grouped by provider, with their mailbox names
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
-            --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>|auto] [--reply-to <mailbox|endpoint>] [--references a,b]
+            --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>|auto] [--reply-to <mailbox|endpoint>] [--in-reply-to <message-id>] [--references a,b]
   enqueue   (JSON envelope on stdin)       lower-level: store without dispatching
   dispatch  --id <uuid> --as <endpoint>    one durable transport attempt
   inbox     --as <endpoint>                pull new messages for this exact session (marks them received)
@@ -145,8 +145,17 @@ try {
       break;
     }
     case 'send': {
-      const from = resolveAddress(flags['--from'], '--from'), to = resolveAddress(flags['--to'], '--to');
+      let inReplyEnvelope = null;
+      if (flags['--in-reply-to']) {
+        if (flags['--to']) throw Error('--to and --in-reply-to are mutually exclusive (--in-reply-to routes to the original sender)');
+        const original = get(root, flags['--in-reply-to']);
+        inReplyEnvelope = original.envelope;
+      }
+      const from = resolveAddress(flags['--from'], '--from');
+      if (inReplyEnvelope && from !== inReplyEnvelope.to) throw Error(`--in-reply-to: only the original recipient (${inReplyEnvelope.to}) can reply; --from is ${from}`);
+      const to = inReplyEnvelope ? inReplyEnvelope.from : resolveAddress(flags['--to'], '--to');
       if (!['assignment', 'notice'].includes(flags['--kind'])) throw Error('--kind assignment|notice required');
+      if (!flags['--task']) flags['--task'] = inReplyEnvelope?.task;
       if (!flags['--task']) throw Error('--task <id> required');
       if (flags['--summary'] && flags['--summary-stdin']) throw Error('--summary and --summary-stdin are mutually exclusive');
       let summary = flags['--summary'] || '';
@@ -154,7 +163,8 @@ try {
       if (!summary) throw Error('--summary "<text>" or --summary-stdin required');
       const id = randomUUID();
       const replyTo = flags['--reply-to'] ? resolveAddress(flags['--reply-to'], '--reply-to') : undefined;
-      const env = { id, from, to, kind: flags['--kind'], task: flags['--task'], revision: flags['--revision'] || gitRevision(), summary: `WIRE-ID: ${id}. ${summary}`, references: flags['--references'] ? flags['--references'].split(',') : [], replyTo };
+      const revision = flags['--revision'] || (inReplyEnvelope ? inReplyEnvelope.revision : gitRevision());
+      const env = { id, from, to, kind: flags['--kind'], task: flags['--task'], revision, summary: `WIRE-ID: ${id}. ${summary}`, references: flags['--references'] ? flags['--references'].split(',') : [], replyTo };
       let enqueued, replaced = null;
       if (flags['--supersedes'] === 'auto') {
         const r = enqueueReplace(root, env);

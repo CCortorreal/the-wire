@@ -17,6 +17,12 @@ All commands: `node <repo>/bin/the-wire.mjs <verb> --root <shared-root>`. Ask th
 the-wire send --from <me> --to <peer> --kind assignment|notice --task <id> --revision <rev> --summary "<curated text>"
 ```
 
+To reply to a specific message (safe in multi-session setups — avoids bare-mailbox cross-wiring):
+```
+the-wire send --from <me> --in-reply-to <message-id> --kind notice --summary "<reply text>"
+```
+`--in-reply-to` auto-routes to the original sender's exact endpoint and inherits `--task`.
+
 - `<me>`/`<peer>` are mailbox names (`claude`, `codex`) or exact `provider:uuid` endpoints.
 - **assignment** = work with a done-state, on one exact revision; one active per recipient.
   **notice** = information; needs no reply.

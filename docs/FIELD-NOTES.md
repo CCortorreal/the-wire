@@ -149,3 +149,30 @@ Three things this does and does not establish:
 
 *Blind spot:* one machine, one root, both sessions already primed by having written the code.
 A stranger's agent on a stranger's machine is the next experiment.
+
+## 14. Bare-mailbox replies cross-wire multi-session pairs — **established (mitigated)**
+
+With two Claude+Codex pairs running (desk and minecraft), a session that received a message via
+direct endpoint and replied with `--to codex` (bare mailbox) hit the wrong Codex — whichever
+held the bare `codex` lease, not the one that sent the original message. The dotted-mailbox
+scheme prevents this *if* both sides lease scoped names before the first message, but the
+failure mode is silent: the reply routes successfully, just to the wrong session.
+
+Mitigation: `--in-reply-to <message-id>` on `send` reads the original message and auto-routes
+to its sender's exact endpoint. No bare-mailbox resolution, no cross-wire. The flag also
+inherits `--task` from the original message, reducing required flags for a reply to just
+`--from`, `--kind`, and `--summary`.
+
+## 15. Dead sessions block lease acquisition — **established (fixed)**
+
+A hard-killed session (Ctrl+C, process kill, system reboot) leaves its lease "live" by timestamp
+for up to 30 minutes. A new session trying to acquire the same mailbox gets
+`"already has a live lease"` and must manually release with the dead session's fence token —
+a multi-step process requiring the operator to read the lease list.
+
+Fix: `leaseAcquire` calls `holderAlive(endpoint)`, which reads the specific holder's registry
+record from `~/.claude/sessions/<pid>.json` by matching `sessionId`, validates that the
+filename PID matches the JSON `pid` field, then probes with `process.kill(pid, 0)`. ESRCH =
+dead = evict. Safe defaults: no registry, no matching record, PID/filename mismatch, or
+multiple matches all return "alive" (no false eviction). Codex-held leases are not
+auto-evicted (no equivalent liveness probe).
