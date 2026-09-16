@@ -101,7 +101,7 @@ test('replyTo redirects return notices to a different endpoint', t => {
 
 test('replyTo null falls back to sender for return notices', t => {
   const p = root(t), m = enqueue(p, msg());
-  assert.equal(m.envelope.replyTo, null);
+  assert.equal(m.envelope.replyTo, undefined);
   receive(p, m.envelope.id, to, m.hash);
   const result = status(p, m.envelope.id, to, 'completed', 'abc123', 'Done');
   const n = get(p, result.notice);
