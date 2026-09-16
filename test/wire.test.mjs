@@ -576,3 +576,160 @@ test('archive filenames are unique across same-second calls', t => {
   const archiveFiles = fs.readdirSync(path.join(p, '.wire', 'archive'));
   assert.equal(archiveFiles.length, 2);
 });
+
+test('N×N isolation: 3 Claude + 2 Codex sessions route correctly with no cross-contamination', t => {
+  const r = root(t);
+  const claudeDesk = 'claude:11111111-1111-4111-8111-111111111111';
+  const claudeMC   = 'claude:22222222-2222-4222-8222-222222222222';
+  const claudeFlow = 'claude:33333333-3333-4333-8333-333333333333';
+  const codexMC    = 'codex:44444444-4444-4444-8444-444444444444';
+  const codexFlow  = 'codex:55555555-5555-4555-8555-555555555555';
+
+  leaseAcquire(r, 'claude',           claudeDesk, ['pull', 'context'], 60000);
+  leaseAcquire(r, 'claude.minecraft', claudeMC,   ['pull', 'context'], 60000);
+  leaseAcquire(r, 'claude.inflow',    claudeFlow, ['pull', 'context'], 60000);
+  leaseAcquire(r, 'codex.minecraft',  codexMC,    ['pull', 'context'], 60000);
+  leaseAcquire(r, 'codex.inflow',     codexFlow,  ['pull', 'context'], 60000);
+
+  // 1. Desk sends MC work to codex.minecraft
+  const a1 = enqueue(r, msg({ from: claudeDesk, to: codexMC, task: 'mc-build', summary: 'Build the server' }));
+  // 2. Desk sends inflow work to codex.inflow, replyTo → claude.inflow
+  const a2 = enqueue(r, msg({ from: claudeDesk, to: codexFlow, task: 'jd-fetch', summary: 'Fetch the JDs', replyTo: claudeFlow }));
+  // 3. Claude.minecraft sends its own work to same codex.minecraft (blocked — one active)
+  assert.throws(() => enqueue(r, msg({ from: claudeMC, to: codexMC, task: 'mc-review', summary: 'Review arch' })), /active assignment/);
+
+  // Each Codex pulls only its own inbox
+  const mcPull = pull(r, codexMC);
+  assert.equal(mcPull.length, 1);
+  assert.equal(mcPull[0].envelope.task, 'mc-build');
+
+  const flowPull = pull(r, codexFlow);
+  assert.equal(flowPull.length, 1);
+  assert.equal(flowPull[0].envelope.task, 'jd-fetch');
+
+  // Claude sessions see nothing in their pull yet (no messages addressed TO them)
+  assert.deepEqual(pull(r, claudeDesk), []);
+  assert.deepEqual(pull(r, claudeMC), []);
+  assert.deepEqual(pull(r, claudeFlow), []);
+
+  // 4. Codex.minecraft completes — notice goes to desk (the sender)
+  const s1 = status(r, a1.envelope.id, codexMC, 'completed', 'abc123', 'Server built', []);
+  const notice1 = get(r, s1.notice);
+  assert.equal(notice1.envelope.to, claudeDesk, 'MC completion notice → desk');
+  assert.notEqual(notice1.envelope.to, claudeMC, 'MC notice must NOT go to claude.minecraft');
+
+  // 5. Codex.inflow completes — notice goes to claude.inflow (via replyTo), NOT desk
+  const s2 = status(r, a2.envelope.id, codexFlow, 'completed', 'abc123', 'JDs fetched', []);
+  const notice2 = get(r, s2.notice);
+  assert.equal(notice2.envelope.to, claudeFlow, 'Inflow completion notice → claude.inflow via replyTo');
+  assert.notEqual(notice2.envelope.to, claudeDesk, 'Inflow notice must NOT go to desk');
+
+  // 6. Each Claude session's pull returns only its own notices
+  const deskPull = pull(r, claudeDesk);
+  assert.equal(deskPull.length, 1);
+  assert.equal(deskPull[0].envelope.id, notice1.envelope.id, 'desk gets MC notice');
+
+  const flowPull2 = pull(r, claudeFlow);
+  assert.equal(flowPull2.length, 1);
+  assert.equal(flowPull2[0].envelope.id, notice2.envelope.id, 'claude.inflow gets inflow notice');
+
+  const mcPull2 = pull(r, claudeMC);
+  assert.equal(mcPull2.length, 0, 'claude.minecraft gets nothing — it sent nothing, received nothing');
+
+  // 7. Context isolation — each session's context only contains its own messages
+  const deskCtx = context(r, claudeDesk, []);
+  assert.ok(deskCtx.includes('mc-build'), 'desk sees its outgoing MC assignment');
+  assert.ok(deskCtx.includes('jd-fetch'), 'desk sees its outgoing inflow assignment');
+
+  // claude.inflow only has the return notice; context shows it when passed as fresh
+  const flowCtx = context(r, claudeFlow, [notice2]);
+  assert.ok(flowCtx.includes(notice2.envelope.id), 'claude.inflow sees its return notice when fresh');
+  assert.ok(!flowCtx.includes('mc-build'), 'claude.inflow does NOT see MC work');
+
+  // list() isolation — claude.inflow only has the return notice
+  const flowMsgs = list(r, claudeFlow);
+  assert.equal(flowMsgs.length, 1, 'claude.inflow has exactly 1 message');
+  assert.equal(flowMsgs[0].envelope.id, notice2.envelope.id);
+
+  const mcCtx = context(r, claudeMC, []);
+  assert.equal(mcCtx, '', 'claude.minecraft has no messages at all');
+
+  // 8. After a1 is complete, claude.minecraft CAN now send to codex.minecraft
+  const a3 = enqueue(r, msg({ from: claudeMC, to: codexMC, task: 'mc-review', summary: 'Review arch' }));
+  assert.equal(a3.envelope.from, claudeMC);
+  assert.equal(a3.envelope.to, codexMC);
+  const mcPull3 = pull(r, codexMC);
+  assert.equal(mcPull3.length, 1);
+  assert.equal(mcPull3[0].envelope.task, 'mc-review');
+  assert.equal(mcPull3[0].envelope.from, claudeMC, 'codex.minecraft sees sender is claude.minecraft');
+});
+
+test('N×N CLI: named mailbox routing end-to-end through the CLI', t => {
+  const r = root(t);
+  const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', r], { encoding: 'utf8' });
+  const runWithInput = (input, ...args) => spawnSync(process.execPath, [CLI, ...args, '--root', r], { input: JSON.stringify(input), encoding: 'utf8' });
+
+  // Set up 2 Claude + 2 Codex sessions
+  run('lease', 'acquire', '--mailbox', 'claude.desk',      '--as', 'claude:11111111-1111-4111-8111-111111111111');
+  run('lease', 'acquire', '--mailbox', 'claude.minecraft',  '--as', 'claude:22222222-2222-4222-8222-222222222222');
+  run('lease', 'acquire', '--mailbox', 'codex.minecraft',   '--as', 'codex:33333333-3333-4333-8333-333333333333');
+  run('lease', 'acquire', '--mailbox', 'codex.inflow',      '--as', 'codex:44444444-4444-4444-8444-444444444444');
+
+  // Desk sends to codex.minecraft with replyTo claude.minecraft
+  const send1 = run('send', '--from', 'claude.desk', '--to', 'codex.minecraft', '--reply-to', 'claude.minecraft',
+    '--kind', 'assignment', '--task', 'mc-build', '--summary', 'Build', '--revision', 'abc');
+  assert.equal(send1.status, 0, send1.stderr);
+  const sent1 = JSON.parse(send1.stdout).enqueued;
+  assert.equal(sent1.envelope.to, 'codex:33333333-3333-4333-8333-333333333333');
+  assert.equal(sent1.envelope.replyTo, 'claude:22222222-2222-4222-8222-222222222222');
+
+  // Desk sends to codex.inflow (no replyTo — notice returns to desk)
+  const send2 = run('send', '--from', 'claude.desk', '--to', 'codex.inflow',
+    '--kind', 'assignment', '--task', 'jd-fetch', '--summary', 'Fetch', '--revision', 'abc');
+  assert.equal(send2.status, 0, send2.stderr);
+  const sent2 = JSON.parse(send2.stdout).enqueued;
+  assert.equal(sent2.envelope.to, 'codex:44444444-4444-4444-8444-444444444444');
+
+  // Codex.minecraft receives and completes
+  const inbox1 = run('inbox', '--as', 'codex:33333333-3333-4333-8333-333333333333');
+  assert.equal(inbox1.status, 0, inbox1.stderr);
+  const pulled1 = JSON.parse(inbox1.stdout);
+  assert.equal(pulled1.length, 1);
+  assert.equal(pulled1[0].envelope.task, 'mc-build');
+
+  const complete1 = runWithInput({ summary: 'Server built', references: [] },
+    'status', '--id', sent1.envelope.id, '--as', 'codex:33333333-3333-4333-8333-333333333333',
+    '--state', 'completed', '--revision', 'abc');
+  assert.equal(complete1.status, 0, complete1.stderr);
+
+  // Codex.inflow receives and completes
+  const inbox2 = run('inbox', '--as', 'codex:44444444-4444-4444-8444-444444444444');
+  assert.equal(inbox2.status, 0, inbox2.stderr);
+  const pulled2 = JSON.parse(inbox2.stdout);
+  assert.equal(pulled2.length, 1);
+  assert.equal(pulled2[0].envelope.task, 'jd-fetch');
+
+  const complete2 = runWithInput({ summary: 'JDs fetched', references: [] },
+    'status', '--id', sent2.envelope.id, '--as', 'codex:44444444-4444-4444-8444-444444444444',
+    '--state', 'completed', '--revision', 'abc');
+  assert.equal(complete2.status, 0, complete2.stderr);
+
+  // claude.minecraft gets the MC notice (via replyTo), desk gets the inflow notice
+  const mcInbox = run('inbox', '--as', 'claude:22222222-2222-4222-8222-222222222222');
+  assert.equal(mcInbox.status, 0, mcInbox.stderr);
+  const mcNotices = JSON.parse(mcInbox.stdout);
+  assert.equal(mcNotices.length, 1, 'claude.minecraft gets exactly 1 notice');
+  assert.ok(mcNotices[0].envelope.summary.includes('mc-build') || mcNotices[0].envelope.summary.includes(sent1.envelope.id));
+
+  const deskInbox = run('inbox', '--as', 'claude:11111111-1111-4111-8111-111111111111');
+  assert.equal(deskInbox.status, 0, deskInbox.stderr);
+  const deskNotices = JSON.parse(deskInbox.stdout);
+  assert.equal(deskNotices.length, 1, 'claude.desk gets exactly 1 notice (inflow, not MC)');
+  assert.ok(deskNotices[0].envelope.summary.includes('jd-fetch') || deskNotices[0].envelope.summary.includes(sent2.envelope.id));
+
+  // Roster shows all 4 sessions correctly
+  const roster = run('roster');
+  assert.equal(roster.status, 0, roster.stderr);
+  const r2 = JSON.parse(roster.stdout);
+  assert.equal(r2.total, 4);
+});
