@@ -733,3 +733,93 @@ test('N×N CLI: named mailbox routing end-to-end through the CLI', t => {
   const r2 = JSON.parse(roster.stdout);
   assert.equal(r2.total, 4);
 });
+
+test('session replacement: new session takes over mailbox but cannot read predecessor mail', async t => {
+  const r = root(t);
+  const claudeDesk = 'claude:11111111-1111-4111-8111-111111111111';
+  const codexV1    = 'codex:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const codexV2    = 'codex:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+  leaseAcquire(r, 'claude', claudeDesk, ['pull', 'context'], 60000);
+  leaseAcquire(r, 'codex', codexV1, ['pull', 'context'], 200);
+
+  // Send assignment to codex (resolves to codexV1)
+  const a = enqueue(r, msg({ from: claudeDesk, to: codexV1, task: 'build', summary: 'Build it' }));
+  assert.equal(a.envelope.to, codexV1);
+
+  // CodexV1 dies — lease expires
+  await new Promise(ok => setTimeout(ok, 250));
+  assert.equal(leaseResolve(r, 'codex'), null, 'codexV1 lease expired');
+
+  // CodexV2 takes over the mailbox
+  leaseAcquire(r, 'codex', codexV2, ['pull', 'context'], 60000);
+  assert.equal(leaseResolve(r, 'codex'), codexV2);
+
+  // CodexV2 cannot pull codexV1's messages — pull is endpoint-scoped
+  const v2Pull = pull(r, codexV2);
+  assert.equal(v2Pull.length, 0, 'codexV2 cannot see codexV1 mail');
+
+  // The message is still pending for codexV1
+  const m = get(r, a.envelope.id);
+  assert.equal(m.envelope.to, codexV1, 'envelope.to is immutable — still codexV1');
+  assert.equal(m.delivery, 'pending', 'never delivered to anyone');
+
+  // Sender can cancel the stranded message and re-send to the new session
+  status(r, a.envelope.id, claudeDesk, 'cancelled', 'abc123', 'CodexV1 died; re-sending', []);
+  const a2 = enqueue(r, msg({ from: claudeDesk, to: codexV2, task: 'build', summary: 'Build it (retry)' }));
+  assert.equal(a2.envelope.to, codexV2);
+
+  const v2Pull2 = pull(r, codexV2);
+  assert.equal(v2Pull2.length, 1);
+  assert.equal(v2Pull2[0].envelope.task, 'build');
+});
+
+test('concurrent senders: two Claude sessions cannot both assign to the same Codex', t => {
+  const r = root(t);
+  const claudeA = 'claude:11111111-1111-4111-8111-111111111111';
+  const claudeB = 'claude:22222222-2222-4222-8222-222222222222';
+  const codex   = 'codex:33333333-3333-4333-8333-333333333333';
+
+  leaseAcquire(r, 'claude.desk', claudeA, ['pull', 'context'], 60000);
+  leaseAcquire(r, 'claude.mc',   claudeB, ['pull', 'context'], 60000);
+  leaseAcquire(r, 'codex',       codex,   ['pull', 'context'], 60000);
+
+  // Claude A sends first
+  const a1 = enqueue(r, msg({ from: claudeA, to: codex, task: 'build-a', summary: 'From A' }));
+  assert.equal(a1.envelope.from, claudeA);
+
+  // Claude B tries to send — blocked by active assignment
+  assert.throws(
+    () => enqueue(r, msg({ from: claudeB, to: codex, task: 'build-b', summary: 'From B' })),
+    /active assignment/
+  );
+
+  // Claude B cannot supersede A's assignment (different sender)
+  assert.throws(
+    () => enqueue(r, msg({ from: claudeB, to: codex, task: 'build-b', summary: 'From B', supersedes: a1.envelope.id })),
+    /Invalid supersession/
+  );
+
+  // Claude A CAN supersede its own assignment (same task required)
+  const a2 = enqueue(r, msg({ from: claudeA, to: codex, task: 'build-a', summary: 'From A v2', supersedes: a1.envelope.id }));
+  assert.equal(get(r, a1.envelope.id).work, 'superseded');
+  assert.equal(a2.envelope.from, claudeA);
+
+  // Now Claude B still can't send (A's new assignment is active)
+  assert.throws(
+    () => enqueue(r, msg({ from: claudeB, to: codex, task: 'build-b', summary: 'From B' })),
+    /active assignment/
+  );
+
+  // Claude B cannot use enqueueReplace either — different sender rejected
+  assert.throws(
+    () => { const raw = { id: randomUUID(), from: claudeB, to: codex, task: 'build-b', kind: 'assignment', revision: 'abc123', summary: 'From B via replace', references: [] }; enqueueReplace(r, raw); },
+    /Cannot replace another sender/
+  );
+
+  // After A completes, B can send
+  pull(r, codex);
+  status(r, a2.envelope.id, codex, 'completed', 'abc123', 'Done', []);
+  const b1 = enqueue(r, msg({ from: claudeB, to: codex, task: 'build-b', summary: 'From B finally' }));
+  assert.equal(b1.envelope.from, claudeB);
+});
