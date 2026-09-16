@@ -180,11 +180,27 @@ try {
       const requested = flags['--provider'];
       if (requested && !PROVIDERS.includes(requested)) throw Error('--provider claude|codex required');
       const leases = leaseList(root).filter(l => l.status === 'active');
+      const allMessages = list(root);
       const prefixes = requested ? [requested] : PROVIDERS;
       const groups = {};
       for (const p of prefixes) {
         const matches = leases.filter(l => l.mailbox === p || l.mailbox.startsWith(p + '.'));
-        if (matches.length) groups[p] = matches.map(l => ({ mailbox: l.mailbox, endpoint: l.endpoint, remaining: Math.max(0, Math.round((Date.parse(l.expiresAt) - Date.now()) / 1000)), capabilities: l.capabilities }));
+        if (!matches.length) continue;
+        const endpoints = [...new Set(matches.map(l => l.endpoint))];
+        const sessions = endpoints.map(ep => {
+          const boxes = matches.filter(l => l.endpoint === ep);
+          const active = allMessages.find(m => m.envelope.kind === 'assignment' && m.envelope.to === ep && !['completed', 'cancelled', 'superseded'].includes(m.work));
+          const pending = allMessages.filter(m => m.envelope.to === ep && m.delivery !== 'received' && !['completed', 'cancelled', 'superseded'].includes(m.work)).length;
+          const session = {
+            endpoint: ep,
+            mailboxes: boxes.map(b => b.mailbox),
+            remaining: Math.max(0, Math.round((Date.parse(boxes[0].expiresAt) - Date.now()) / 1000)),
+          };
+          if (active) session.working = { id: active.envelope.id, task: active.envelope.task, work: active.work, age: Math.round((Date.now() - Date.parse(active.createdAt)) / 1000) + 's' };
+          if (pending) session.pendingInbox = pending;
+          return session;
+        });
+        groups[p] = sessions;
       }
       result = { providers: groups, total: leases.length };
       break;

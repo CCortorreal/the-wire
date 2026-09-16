@@ -297,8 +297,9 @@ test('multi-session: CLI roster groups by provider and resolveAddress suggests n
   const result = JSON.parse(roster.stdout);
   assert.equal(result.providers.codex.length, 2);
   assert.equal(result.providers.claude.length, 1);
-  assert.ok(result.providers.codex.some(l => l.mailbox === 'codex.inflow'));
-  assert.ok(result.providers.codex.some(l => l.mailbox === 'codex.minecraft'));
+  const allMailboxes = result.providers.codex.flatMap(s => s.mailboxes);
+  assert.ok(allMailboxes.includes('codex.inflow'));
+  assert.ok(allMailboxes.includes('codex.minecraft'));
   const sendBare = run('send', '--from', 'claude', '--to', 'codex', '--kind', 'notice', '--task', 'test', '--summary', 'hello');
   assert.equal(sendBare.status, 1);
   assert.match(sendBare.stderr, /codex\.inflow/);
@@ -325,6 +326,30 @@ test('multi-session: hook renews all mailboxes held by the session and leases a 
   assert.ok(leases.some(l => l.mailbox === 'claude.desk'), 'hook must renew the named mailbox');
   assert.ok(leases.some(l => l.mailbox === 'claude'), 'hook must also acquire the bare provider mailbox');
   assert.equal(leases.filter(l => l.endpoint === actor).length, 2);
+});
+
+test('roster shows working state and pending inbox per session', (t) => {
+  const r = root(t);
+  const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', r], { encoding: 'utf8' });
+  const codexA = 'codex:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const claudeC = 'claude:cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  run('lease', 'acquire', '--mailbox', 'codex.worker', '--as', codexA);
+  run('lease', 'acquire', '--mailbox', 'claude', '--as', claudeC);
+  const sent = run('send', '--from', 'claude', '--to', 'codex.worker', '--kind', 'assignment', '--task', 'heavy-lift', '--summary', 'do the thing', '--revision', 'abc');
+  assert.equal(sent.status, 0, sent.stderr);
+  const assignmentId = JSON.parse(sent.stdout).enqueued.envelope.id;
+  const roster = run('roster');
+  assert.equal(roster.status, 0, roster.stderr);
+  const result = JSON.parse(roster.stdout);
+  const codexSession = result.providers.codex[0];
+  assert.deepEqual(codexSession.mailboxes, ['codex.worker']);
+  assert.ok(codexSession.working);
+  assert.equal(codexSession.working.task, 'heavy-lift');
+  assert.equal(codexSession.working.id, assignmentId);
+  assert.equal(codexSession.pendingInbox, 1);
+  const claudeSession = result.providers.claude[0];
+  assert.equal(claudeSession.working, undefined);
+  assert.equal(claudeSession.pendingInbox, undefined);
 });
 
 test('activeAssignment returns the blocking message and error includes its id and task', (t) => {
