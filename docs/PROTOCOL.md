@@ -110,6 +110,34 @@ A hook present in config is not active until the provider trusts it and a **new*
 loaded it. After installing or changing the hook, the canary from a fresh session is the proof;
 config inspection is not.
 
+## Multi-session addressing
+
+A single machine may run N Claude sessions and N Codex sessions concurrently. Each session can
+hold one or more named mailboxes:
+
+```
+lease acquire --mailbox codex.inflow --as codex:<uuid-A>
+lease acquire --mailbox codex.minecraft --as codex:<uuid-B>
+```
+
+The bare provider name (`codex`, `claude`) is one more mailbox, not a special concept. A session
+that leases `codex.inflow` can also lease `codex` — but only one endpoint per mailbox at a time.
+If session A holds `codex` and session B holds `codex.minecraft`, `send --to codex` reaches A and
+`send --to codex.minecraft` reaches B.
+
+**Hook support:** the prompt-submit hook accepts `--mailbox <name>` and leases that mailbox on
+every prompt. It also calls `leaseRenewEndpoint` to renew _all_ mailboxes held by the session, so
+a manually acquired mailbox stays alive as long as the session keeps prompting.
+
+**Discovery:** `roster` (or `lease list`) shows all active mailboxes with their endpoints.
+
+**Addressing errors:** `send --to codex` fails when no session holds a `codex` mailbox. If other
+`codex.*` mailboxes exist, the error lists them — the sender picks the right one.
+
+**Pull is endpoint-scoped, not mailbox-scoped.** A session receives messages addressed to its
+exact endpoint regardless of which mailboxes it holds. Mailboxes are a naming convenience for
+senders; they do not gate receipt.
+
 ## Verification status
 
 - Broker semantics (dedupe, supersession, attempt claim, receipt precedence, atomic notices,

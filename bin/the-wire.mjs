@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROVIDERS, endpoint, enqueue, get, list, receive, status, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, wireHealth, archive, pull } from '../lib/wire-store.mjs';
+import { PROVIDERS, endpoint, enqueue, get, list, receive, status, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, wireHealth, archive, pull } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
@@ -24,6 +24,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   discover                                 list live Claude sessions and this Codex session id when exposed
   install   --provider claude|codex        copy the skill into your provider's skill dir; print the hook snippet
   lease     acquire|renew|release|list     --mailbox <name> --as <provider:uuid> [--ttl ms] [--fence n]
+  roster    [--provider claude|codex]      all active sessions grouped by provider, with their mailbox names
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
             --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>] [--references a,b]
   enqueue   (JSON envelope on stdin)       lower-level: store without dispatching
@@ -38,6 +39,10 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   archive
   steward                                  one background sweep (dispatch pending, re-wake unconfirmed)
 
+Multi-session: each session can lease a named mailbox (e.g. codex.inflow) via
+  lease acquire --mailbox codex.inflow --as codex:<uuid>
+The hook auto-renews all mailboxes held by the session. Address a specific session
+with --to codex.inflow; --to codex still resolves the bare provider mailbox.
 Protocol: docs/PROTOCOL.md. Agent setup: BOOTSTRAP.md.`;
 
 const [verb, ...rest] = process.argv.slice(2);
@@ -60,8 +65,13 @@ try {
     if (!value) throw Error(`${label} required`);
     if (value.includes(':')) return endpoint(value);
     const resolved = leaseResolve(root, value);
-    if (!resolved) throw Error(`No live lease for mailbox "${value}". The ${value} session must run: the-wire lease acquire --mailbox ${value} --as ${value}:<its session uuid>`);
-    return resolved;
+    if (resolved) return resolved;
+    const prefix = PROVIDERS.find(p => value === p || value.startsWith(p + '.'));
+    if (prefix) {
+      const available = leasesByPrefix(root, prefix);
+      if (available.length) throw Error(`No live lease for mailbox "${value}". Active ${prefix} mailboxes: ${available.map(a => a.mailbox).join(', ')}. Use --to <mailbox> to address a specific session.`);
+    }
+    throw Error(`No live lease for mailbox "${value}". The ${value} session must run: the-wire lease acquire --mailbox ${value} --as <provider>:<session uuid>`);
   };
   const gitRevision = () => { const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true }); return r.status === 0 ? r.stdout.trim() : 'unversioned'; };
   let result;
@@ -158,6 +168,19 @@ try {
       const detail = stdinJson();
       result = status(root, flags['--id'], flags['--as'], flags['--state'], flags['--revision'], detail.summary, detail.references);
       if (result.notice) { const n = get(root, result.notice); result.notification = n.delivery === 'pending' ? dispatch(root, result.notice, flags['--as']) : n; }
+      break;
+    }
+    case 'roster': {
+      const requested = flags['--provider'];
+      if (requested && !PROVIDERS.includes(requested)) throw Error('--provider claude|codex required');
+      const leases = leaseList(root).filter(l => l.status === 'active');
+      const prefixes = requested ? [requested] : PROVIDERS;
+      const groups = {};
+      for (const p of prefixes) {
+        const matches = leases.filter(l => l.mailbox === p || l.mailbox.startsWith(p + '.'));
+        if (matches.length) groups[p] = matches.map(l => ({ mailbox: l.mailbox, endpoint: l.endpoint, remaining: Math.max(0, Math.round((Date.parse(l.expiresAt) - Date.now()) / 1000)), capabilities: l.capabilities }));
+      }
+      result = { providers: groups, total: leases.length };
       break;
     }
     case 'health': result = wireHealth(root); break;

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { enqueue, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, status, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
+import { enqueue, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, status, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { wake as codexWake, codexBin, probeCodex, parseQueueAcceptance } from '../lib/drivers/codex-queue.mjs';
 import { sweep } from '../lib/steward.mjs';
@@ -243,4 +243,86 @@ test('prompt hook is quiet when nothing is new and nothing awaits action', t => 
   run();
   const pending = run();
   assert.match(JSON.parse(pending.stdout.trim()).hookSpecificOutput.additionalContext, /ACTION PENDING/, 'an assignment awaiting action stays visible until acted on');
+});
+
+test('multi-session: one endpoint can hold multiple named mailboxes, all renewed together', (t) => {
+  const r = root(t);
+  const sessionA = 'codex:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const sessionB = 'codex:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  leaseAcquire(r, 'codex.inflow', sessionA, ['pull', 'context'], 30000);
+  leaseAcquire(r, 'codex', sessionA, ['pull', 'context'], 30000);
+  leaseAcquire(r, 'codex.minecraft', sessionB, ['pull', 'context'], 30000);
+  assert.equal(leaseResolve(r, 'codex'), sessionA);
+  assert.equal(leaseResolve(r, 'codex.inflow'), sessionA);
+  assert.equal(leaseResolve(r, 'codex.minecraft'), sessionB);
+  const renewed = leaseRenewEndpoint(r, sessionA, 60000);
+  assert.deepEqual(renewed.sort(), ['codex', 'codex.inflow']);
+  const renewedB = leaseRenewEndpoint(r, sessionB, 60000);
+  assert.deepEqual(renewedB, ['codex.minecraft']);
+  const all = leasesByPrefix(r, 'codex');
+  assert.equal(all.length, 3);
+  assert.deepEqual(all.map(a => a.mailbox), ['codex', 'codex.inflow', 'codex.minecraft']);
+  assert.equal(all.find(a => a.mailbox === 'codex.inflow').endpoint, sessionA);
+  assert.equal(all.find(a => a.mailbox === 'codex.minecraft').endpoint, sessionB);
+});
+
+test('multi-session: send resolves named mailboxes and messages reach the right endpoint', (t) => {
+  const r = root(t);
+  const codexInflow = 'codex:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const codexMinecraft = 'codex:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const claude = 'claude:cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  leaseAcquire(r, 'codex.inflow', codexInflow, ['pull', 'context'], 30000);
+  leaseAcquire(r, 'codex.minecraft', codexMinecraft, ['pull', 'context'], 30000);
+  leaseAcquire(r, 'claude', claude, ['pull', 'context'], 30000);
+  const m1 = enqueue(r, msg({ from: claude, to: codexInflow, task: 'inflow-review', summary: 'Review inflow build' }));
+  assert.equal(m1.envelope.to, codexInflow);
+  const m2 = enqueue(r, msg({ from: claude, to: codexMinecraft, task: 'minecraft-build', summary: 'Build the thing' }));
+  assert.equal(m2.envelope.to, codexMinecraft);
+  const inflowInbox = pull(r, codexInflow);
+  assert.equal(inflowInbox.length, 1);
+  assert.equal(inflowInbox[0].envelope.task, 'inflow-review');
+  const mcInbox = pull(r, codexMinecraft);
+  assert.equal(mcInbox.length, 1);
+  assert.equal(mcInbox[0].envelope.task, 'minecraft-build');
+});
+
+test('multi-session: CLI roster groups by provider and resolveAddress suggests named mailboxes', (t) => {
+  const r = root(t);
+  const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', r], { encoding: 'utf8' });
+  run('lease', 'acquire', '--mailbox', 'codex.inflow', '--as', 'codex:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  run('lease', 'acquire', '--mailbox', 'codex.minecraft', '--as', 'codex:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+  run('lease', 'acquire', '--mailbox', 'claude', '--as', 'claude:cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+  const roster = run('roster');
+  assert.equal(roster.status, 0, roster.stderr);
+  const result = JSON.parse(roster.stdout);
+  assert.equal(result.providers.codex.length, 2);
+  assert.equal(result.providers.claude.length, 1);
+  assert.ok(result.providers.codex.some(l => l.mailbox === 'codex.inflow'));
+  assert.ok(result.providers.codex.some(l => l.mailbox === 'codex.minecraft'));
+  const sendBare = run('send', '--from', 'claude', '--to', 'codex', '--kind', 'notice', '--task', 'test', '--summary', 'hello');
+  assert.equal(sendBare.status, 1);
+  assert.match(sendBare.stderr, /codex\.inflow/);
+  assert.match(sendBare.stderr, /codex\.minecraft/);
+  const sendNamed = run('send', '--from', 'claude', '--to', 'codex.inflow', '--kind', 'notice', '--task', 'test', '--summary', 'hello');
+  assert.equal(sendNamed.status, 0, sendNamed.stderr);
+  const sent = JSON.parse(sendNamed.stdout);
+  assert.equal(sent.enqueued.envelope.to, 'codex:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+});
+
+test('multi-session: hook renews all mailboxes held by the session and leases a --mailbox name', (t) => {
+  const r = root(t);
+  const session = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const actor = `claude:${session}`;
+  leaseAcquire(r, 'claude.desk', actor, ['pull', 'context'], 5000);
+  const hookPath = path.join(REPO, 'lib', 'hook.mjs');
+  const run = (prompt = 'hello') => spawnSync(process.execPath, [hookPath, '--root', r, '--provider', 'claude', '--mailbox', 'claude.desk'], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: session, prompt, cwd: r }),
+    encoding: 'utf8',
+  });
+  const result = run();
+  assert.equal(result.status, 0, result.stderr);
+  const leases = leaseList(r).filter(l => l.status === 'active');
+  assert.ok(leases.some(l => l.mailbox === 'claude.desk'), 'hook must renew the named mailbox');
+  assert.ok(leases.some(l => l.mailbox === 'claude'), 'hook must also acquire the bare provider mailbox');
+  assert.equal(leases.filter(l => l.endpoint === actor).length, 2);
 });
