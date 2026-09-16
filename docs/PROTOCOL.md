@@ -196,6 +196,20 @@ canonical form; at load time, the stored form IS the canonical form from that ve
 and reports hash mismatches (tampered messages). It does not modify messages or leases beyond
 recovery. Run it when any operation fails with a persistent error.
 
+**Error diagnostics:** corruption and "unknown message" errors include the message ID so the
+operator can identify and investigate the specific message. `validateState` (load-time) and `find`
+(transaction-time) both report the offending ID on hash mismatch.
+
+**Archive uniqueness:** archive filenames include an 8-character random suffix after the timestamp
+(`wire-<iso>-<rand8>.json`) to prevent same-second collision when rapid archive cycles occur.
+
+**Defensive context:** the `context()` function degrades gracefully if the cursor state file is
+corrupt or unreadable — it treats the cursor as zero (all messages are "new") rather than crashing
+the prompt hook. The hook's top-level catch provides the final safety net.
+
+**Hook flag parser:** `flag()` returns `undefined` when a flag is absent, not a positional argument
+from a different flag. This prevents wasted lease-acquire attempts on every hook invocation.
+
 ## Verification status
 
 - Broker semantics (dedupe, supersession, attempt claim, receipt precedence, atomic notices,

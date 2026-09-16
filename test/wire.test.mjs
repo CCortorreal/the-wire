@@ -541,3 +541,38 @@ test('CLI send --supersedes auto replaces active assignment without knowing its 
   assert.equal(result.replaced.id, id1);
   assert.equal(get(r, id1).work, 'cancelled');
 });
+
+test('error messages include the message ID for diagnostics', t => {
+  const p = root(t);
+  const m = enqueue(p, msg());
+  const bogusId = randomUUID();
+  assert.throws(() => status(p, bogusId, to, 'working', 'abc123', 'test'), { message: new RegExp(bogusId) });
+  const wireFile = path.join(p, '.wire', 'wire.json');
+  const state = JSON.parse(fs.readFileSync(wireFile, 'utf8'));
+  state.messages[0].hash = 'deadbeef'.repeat(8);
+  fs.writeFileSync(wireFile, JSON.stringify(state));
+  assert.throws(() => receive(p, m.envelope.id, to, m.hash), { message: new RegExp(m.envelope.id) });
+});
+
+test('context degrades gracefully when cursor state is corrupt', t => {
+  const p = root(t);
+  enqueue(p, msg());
+  const cursorsFile = path.join(p, '.wire', 'cursors.json');
+  fs.mkdirSync(path.dirname(cursorsFile), { recursive: true });
+  fs.writeFileSync(cursorsFile, '{"schema":"bad"}');
+  const result = context(p, to, []);
+  assert.ok(result.includes('the-wire inbox'), 'context returned despite corrupt cursors');
+});
+
+test('archive filenames are unique across same-second calls', t => {
+  const p = root(t);
+  const m = enqueue(p, msg({ kind: 'notice' }));
+  receive(p, m.envelope.id, to, m.hash);
+  const r1 = archive(p);
+  enqueue(p, msg({ id: randomUUID(), kind: 'notice' }));
+  receive(p, list(p)[0].envelope.id, list(p)[0].envelope.to, list(p)[0].hash);
+  const r2 = archive(p);
+  assert.notEqual(r1.archive, r2.archive);
+  const archiveFiles = fs.readdirSync(path.join(p, '.wire', 'archive'));
+  assert.equal(archiveFiles.length, 2);
+});
