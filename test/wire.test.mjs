@@ -87,6 +87,40 @@ test('only the sender cancels; only the recipient reports', t => {
   const c = status(p, m.envelope.id, from, 'cancelled', 'abc123', 'Withdrawn');
   assert.equal(get(p, m.envelope.id).work, 'cancelled'); assert.equal(get(p, c.notice).envelope.to, to);
 });
+test('replyTo redirects return notices to a different endpoint', t => {
+  const p = root(t);
+  const replyDest = 'claude:33333333-3333-4333-8333-333333333333';
+  const m = enqueue(p, msg({ replyTo: replyDest }));
+  assert.equal(m.envelope.replyTo, replyDest);
+  receive(p, m.envelope.id, to, m.hash);
+  const result = status(p, m.envelope.id, to, 'completed', 'abc123', 'Done');
+  const n = get(p, result.notice);
+  assert.equal(n.envelope.to, replyDest, 'return notice should go to replyTo, not from');
+  assert.equal(n.envelope.from, to, 'notice sender is the recipient who completed');
+});
+
+test('replyTo null falls back to sender for return notices', t => {
+  const p = root(t), m = enqueue(p, msg());
+  assert.equal(m.envelope.replyTo, null);
+  receive(p, m.envelope.id, to, m.hash);
+  const result = status(p, m.envelope.id, to, 'completed', 'abc123', 'Done');
+  const n = get(p, result.notice);
+  assert.equal(n.envelope.to, from, 'without replyTo, notice goes to original sender');
+});
+
+test('replyTo same as sender is rejected', () => {
+  assert.throws(() => enqueue(root({ after() {} }), msg({ replyTo: from })), /replyTo must differ from sender/);
+});
+
+test('sender cancel notice ignores replyTo and goes to recipient', t => {
+  const p = root(t);
+  const replyDest = 'claude:33333333-3333-4333-8333-333333333333';
+  const m = enqueue(p, msg({ replyTo: replyDest }));
+  const result = status(p, m.envelope.id, from, 'cancelled', 'abc123', 'Withdrawn');
+  const n = get(p, result.notice);
+  assert.equal(n.envelope.to, to, 'cancel notice goes to recipient, not replyTo');
+});
+
 test('capacity failure rolls back status and notice together', t => {
   const p = root(t), m = enqueue(p, msg()); receive(p, m.envelope.id, to, m.hash);
   for (let i = 0; i < 99; i++) enqueue(p, msg({ kind: 'notice', summary: 'Notice' }));

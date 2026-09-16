@@ -138,6 +138,25 @@ a manually acquired mailbox stays alive as long as the session keeps prompting.
 exact endpoint regardless of which mailboxes it holds. Mailboxes are a naming convenience for
 senders; they do not gate receipt.
 
+## Reply-to redirection (`--reply-to`)
+
+Assignments can carry an optional `replyTo` endpoint or mailbox. When the recipient reports
+`blocked`, `completed`, or `cancelled` status, the return notice goes to `replyTo` instead of the
+original sender. This lets a desk session send work on behalf of a specialized session:
+
+```
+send --from claude --to codex.minecraft --reply-to claude.minecraft \
+     --kind assignment --task architecture-review --summary "..."
+```
+
+When Codex completes the review, the return notice goes to `claude.minecraft`, not `claude` (the
+desk). Sender cancellation (`--state cancelled`) always notifies the recipient directly regardless
+of `replyTo` — the recipient needs to know its work was cancelled.
+
+If `replyTo` is omitted or null, the return notice goes to the original sender (backward compatible).
+`replyTo` must differ from the sender; setting it to the sender is rejected at envelope validation.
+`replyTo` is resolved through the lease system at send time, the same way `--from` and `--to` are.
+
 ## Auto-replace (`--supersedes auto`)
 
 `send --supersedes auto` atomically cancels the recipient's active assignment (any task) and
