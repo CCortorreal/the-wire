@@ -256,6 +256,25 @@ test('CLI end to end: lease → send by mailbox name → inbox → status → he
   assert.equal(r.status, 1); assert.match(r.stderr, /No live lease for mailbox "nobody"/);
 });
 
+test('CLI send --reply-to redirects return notice to a different session', t => {
+  const p = root(t), stub = stubCodex(p, 'Queued message 0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f for thread THREAD.');
+  const env = { ...process.env, THE_WIRE_CODEX_BIN: stub };
+  const cli = (args, input) => { const r = spawnSync(process.execPath, [CLI, ...args, '--root', p], { encoding: 'utf8', input, env, windowsHide: true }); if (r.status !== 0) throw Error(`${args.join(' ')} → ${r.stderr}`); return JSON.parse(r.stdout); };
+  const desk = 'claude:11111111-1111-4111-8111-111111111111';
+  const minecraft = 'claude:33333333-3333-4333-8333-333333333333';
+  const codex = 'codex:22222222-2222-4222-8222-222222222222';
+  cli(['lease', 'acquire', '--mailbox', 'claude.desk', '--as', desk]);
+  cli(['lease', 'acquire', '--mailbox', 'claude.minecraft', '--as', minecraft]);
+  cli(['lease', 'acquire', '--mailbox', 'codex', '--as', codex]);
+  const sent = cli(['send', '--from', 'claude.desk', '--to', 'codex', '--kind', 'assignment', '--task', 'review', '--summary', 'Review arch', '--revision', 'r1', '--reply-to', 'claude.minecraft']);
+  assert.equal(sent.enqueued.envelope.replyTo, minecraft);
+  cli(['inbox', '--as', codex]);
+  const st = cli(['status', '--id', sent.enqueued.envelope.id, '--as', codex, '--state', 'completed', '--revision', 'r1'], JSON.stringify({ summary: 'Done', references: [] }));
+  const notice = cli(['read', '--id', st.notice]);
+  assert.equal(notice.envelope.to, minecraft, 'return notice must go to replyTo, not the original sender');
+  assert.equal(notice.envelope.from, codex);
+});
+
 test('prompt hook is quiet when nothing is new and nothing awaits action', t => {
   const r = root(t);
   const hook = path.join(REPO, 'lib', 'hook.mjs');
