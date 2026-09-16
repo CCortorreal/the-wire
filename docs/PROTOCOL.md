@@ -138,6 +138,17 @@ a manually acquired mailbox stays alive as long as the session keeps prompting.
 exact endpoint regardless of which mailboxes it holds. Mailboxes are a naming convenience for
 senders; they do not gate receipt.
 
+## Auto-replace (`--supersedes auto`)
+
+`send --supersedes auto` atomically cancels the recipient's active assignment (any task) and
+enqueues the new one. This differs from normal supersession (`--supersedes <id>`), which requires
+the same task and marks the prior as `superseded`. Auto-replace marks the prior as `cancelled`
+and records why in its status. It is a no-op (enqueues normally) when no active assignment exists.
+
+The active-assignment error now includes the blocking message's ID and task so the sender can
+choose: `--supersedes <id>` for same-task replacement, `--supersedes auto` for cross-task
+replacement, or cancel + re-send manually.
+
 ## Verification status
 
 - Broker semantics (dedupe, supersession, attempt claim, receipt precedence, atomic notices,

@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROVIDERS, endpoint, enqueue, get, list, receive, status, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, wireHealth, archive, pull } from '../lib/wire-store.mjs';
+import { PROVIDERS, endpoint, enqueue, enqueueReplace, get, list, receive, status, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
@@ -26,7 +26,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   lease     acquire|renew|release|list     --mailbox <name> --as <provider:uuid> [--ttl ms] [--fence n]
   roster    [--provider claude|codex]      all active sessions grouped by provider, with their mailbox names
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
-            --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>] [--references a,b]
+            --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>|auto] [--references a,b]
   enqueue   (JSON envelope on stdin)       lower-level: store without dispatching
   dispatch  --id <uuid> --as <endpoint>    one durable transport attempt
   inbox     --as <endpoint>                pull new messages for this exact session (marks them received)
@@ -152,10 +152,16 @@ try {
       if (!summary) throw Error('--summary "<text>" or --summary-stdin required');
       const id = randomUUID();
       const env = { id, from, to, kind: flags['--kind'], task: flags['--task'], revision: flags['--revision'] || gitRevision(), summary: `WIRE-ID: ${id}. ${summary}`, references: flags['--references'] ? flags['--references'].split(',') : [] };
-      if (flags['--supersedes']) env.supersedes = flags['--supersedes'];
-      const enqueued = enqueue(root, env);
+      let enqueued, replaced = null;
+      if (flags['--supersedes'] === 'auto') {
+        const r = enqueueReplace(root, env);
+        enqueued = r.message; replaced = r.replaced;
+      } else {
+        if (flags['--supersedes']) env.supersedes = flags['--supersedes'];
+        enqueued = enqueue(root, env);
+      }
       let dispatched = null; try { dispatched = dispatch(root, id, from); } catch {}
-      result = { enqueued, dispatched, meaning: dispatched?.delivery === 'accepted' ? 'Transport accepted the message. That is not receipt; check `read --id` for delivery=received.' : 'Transport did not confirm. The message is stored; the recipient pulls it on its next prompt (if its hook is installed) or a steward sweep re-wakes it.' };
+      result = { enqueued, replaced, dispatched, meaning: dispatched?.delivery === 'accepted' ? 'Transport accepted the message. That is not receipt; check `read --id` for delivery=received.' : 'Transport did not confirm. The message is stored; the recipient pulls it on its next prompt (if its hook is installed) or a steward sweep re-wakes it.' };
       break;
     }
     case 'enqueue': result = enqueue(root, stdinJson()); break;

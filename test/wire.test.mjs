@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { enqueue, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, status, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
+import { enqueue, enqueueReplace, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, status, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { wake as codexWake, codexBin, probeCodex, parseQueueAcceptance } from '../lib/drivers/codex-queue.mjs';
 import { sweep } from '../lib/steward.mjs';
@@ -325,4 +325,64 @@ test('multi-session: hook renews all mailboxes held by the session and leases a 
   assert.ok(leases.some(l => l.mailbox === 'claude.desk'), 'hook must renew the named mailbox');
   assert.ok(leases.some(l => l.mailbox === 'claude'), 'hook must also acquire the bare provider mailbox');
   assert.equal(leases.filter(l => l.endpoint === actor).length, 2);
+});
+
+test('activeAssignment returns the blocking message and error includes its id and task', (t) => {
+  const r = root(t);
+  const m1 = enqueue(r, msg({ task: 'old-build' }));
+  const active = activeAssignment(r, to);
+  assert.ok(active);
+  assert.equal(active.envelope.id, m1.envelope.id);
+  assert.equal(active.envelope.task, 'old-build');
+  try { enqueue(r, msg({ task: 'new-build' })); assert.fail('should throw'); } catch (err) {
+    assert.match(err.message, /old-build/);
+    assert.match(err.message, new RegExp(m1.envelope.id));
+    assert.match(err.message, /--supersedes.*auto/);
+    assert.equal(err.activeId, m1.envelope.id);
+  }
+});
+
+test('enqueueReplace cancels active cross-task assignment and enqueues new one atomically', (t) => {
+  const r = root(t);
+  const m1 = enqueue(r, msg({ task: 'stale-build' }));
+  assert.ok(activeAssignment(r, to));
+  const result = enqueueReplace(r, msg({ task: 'fresh-work' }));
+  assert.equal(result.replaced.id, m1.envelope.id);
+  assert.equal(result.replaced.task, 'stale-build');
+  assert.equal(get(r, m1.envelope.id).work, 'cancelled');
+  assert.equal(activeAssignment(r, to).envelope.id, result.message.envelope.id);
+  assert.equal(result.message.envelope.task, 'fresh-work');
+});
+
+test('enqueueReplace is a no-op when no active assignment exists', (t) => {
+  const r = root(t);
+  const result = enqueueReplace(r, msg({ task: 'first-job' }));
+  assert.equal(result.replaced, null);
+  assert.equal(result.message.envelope.task, 'first-job');
+  assert.equal(activeAssignment(r, to).envelope.id, result.message.envelope.id);
+});
+
+test('CLI send --supersedes auto replaces active assignment without knowing its id', (t) => {
+  const r = root(t);
+  leaseAcquire(r, 'claude', from, ['pull', 'context'], 60000);
+  leaseAcquire(r, 'codex', to, ['pull', 'context'], 60000);
+  const send = (task, supersedes) => {
+    const args = [CLI, 'send', '--root', r, '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--task', task, '--summary', 'test', '--revision', 'abc'];
+    if (supersedes) args.push('--supersedes', supersedes);
+    return spawnSync(process.execPath, args, { encoding: 'utf8' });
+  };
+  const r1 = send('build-a');
+  assert.equal(r1.status, 0, r1.stderr);
+  const id1 = JSON.parse(r1.stdout).enqueued.envelope.id;
+  const r2 = send('build-b');
+  assert.equal(r2.status, 1);
+  assert.match(r2.stderr, /build-a/);
+  assert.match(r2.stderr, new RegExp(id1));
+  const r3 = send('build-b', 'auto');
+  assert.equal(r3.status, 0, r3.stderr);
+  const result = JSON.parse(r3.stdout);
+  assert.equal(result.enqueued.envelope.task, 'build-b');
+  assert.ok(result.replaced);
+  assert.equal(result.replaced.id, id1);
+  assert.equal(get(r, id1).work, 'cancelled');
 });
