@@ -192,3 +192,22 @@ self-heal. `leaseList` reports `active` / `stale` (expired + alive) / `expired` 
 dead or unknown). Stale leases resolve for addressing but can be freely taken over by
 `leaseAcquire` — expiry gates takeover, not resolution. Eviction in `leaseAcquire` fires
 only on `dead`, never on `unknown` — same fail-safe as before.
+
+## 17. Second session is invisible when bare mailbox is taken — **established (fixed)**
+
+When multiple sessions of the same provider run, the first to boot claims the bare mailbox
+(`claude` or `codex`). Every subsequent session's hook silently fails `leaseAcquire` and
+holds **no mailbox at all** — it's completely invisible to bare-name addressing. The session
+can still pull its inbox (messages addressed to its endpoint arrive), but it can't be
+reached by peers using `--to claude` and has no mailbox name to use for `--from`.
+
+Fix: the hook now auto-acquires a scoped mailbox when the bare mailbox is taken and the
+session holds no mailbox. It tries progressively longer UUID prefixes (4, 8, 12, full) until
+one is available (e.g., `claude.c9f8`, or `claude.c9f8c3c1` on 4-char collision). The scoped
+name is deterministic and appears in `lease list` and `roster`.
+
+If all four candidates are already occupied (rare — requires other sessions to have explicitly
+claimed those exact scoped names, since random UUIDs won't collide at full length), the
+session runs with no named mailbox and the hook emits a warning:
+peers must use the full endpoint (`provider:uuid`) to address it. The warning breaks the
+quiet-exit path so it is always visible.

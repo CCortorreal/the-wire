@@ -503,6 +503,78 @@ test('multi-session: hook renews all mailboxes held by the session and leases a 
   assert.equal(leases.filter(l => l.endpoint === actor).length, 2);
 });
 
+test('multi-session: hook auto-acquires scoped mailbox when bare is taken by another session', (t) => {
+  const r = root(t);
+  const sessionA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const sessionB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  // Session A already holds the bare mailbox
+  leaseAcquire(r, 'claude', `claude:${sessionA}`, ['pull', 'context'], 60000);
+  // Session B's hook fires — bare mailbox is taken, so it auto-scopes
+  const hookPath = path.join(REPO, 'lib', 'hook.mjs');
+  const run = spawnSync(process.execPath, [hookPath, '--root', r, '--provider', 'claude'], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: sessionB, prompt: 'hello', cwd: r }),
+    encoding: 'utf8',
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const leases = leaseList(r).filter(l => l.endpoint === `claude:${sessionB}`);
+  assert.equal(leases.length, 1, 'session B must hold exactly one mailbox');
+  assert.equal(leases[0].mailbox, `claude.${sessionB.slice(0, 4)}`, 'auto-scoped mailbox uses 4-char uuid prefix');
+  assert.equal(leaseResolve(r, 'claude'), `claude:${sessionA}`, 'bare mailbox still belongs to session A');
+  assert.equal(leaseResolve(r, `claude.${sessionB.slice(0, 4)}`), `claude:${sessionB}`, 'scoped mailbox resolves to session B');
+});
+
+test('multi-session: hook auto-scoping resolves prefix collisions by lengthening', (t) => {
+  const r = root(t);
+  // Two sessions share the first 4 chars of their UUID
+  const sessionB = 'bbbb1111-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const sessionC = 'bbbb2222-cccc-4ccc-8ccc-cccccccccccc';
+  const sessionA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  // Session A holds the bare mailbox
+  leaseAcquire(r, 'claude', `claude:${sessionA}`, ['pull', 'context'], 60000);
+  const hookPath = path.join(REPO, 'lib', 'hook.mjs');
+  const run = (sid) => spawnSync(process.execPath, [hookPath, '--root', r, '--provider', 'claude'], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: sid, prompt: 'hello', cwd: r }),
+    encoding: 'utf8',
+  });
+  // Session B fires first — gets claude.bbbb
+  const resultB = run(sessionB);
+  assert.equal(resultB.status, 0, resultB.stderr);
+  const leasesB = leaseList(r).filter(l => l.endpoint === `claude:${sessionB}`);
+  assert.equal(leasesB.length, 1);
+  assert.equal(leasesB[0].mailbox, 'claude.bbbb', 'session B gets 4-char prefix');
+  // Session C fires — claude.bbbb is taken, so it lengthens to claude.bbbb2222
+  const resultC = run(sessionC);
+  assert.equal(resultC.status, 0, resultC.stderr);
+  const leasesC = leaseList(r).filter(l => l.endpoint === `claude:${sessionC}`);
+  assert.equal(leasesC.length, 1, 'session C must also hold a mailbox');
+  assert.equal(leasesC[0].mailbox, 'claude.bbbb2222', 'session C gets 8-char prefix after 4-char collision');
+  // Both are independently addressable
+  assert.equal(leaseResolve(r, 'claude.bbbb'), `claude:${sessionB}`);
+  assert.equal(leaseResolve(r, 'claude.bbbb2222'), `claude:${sessionC}`);
+});
+
+test('multi-session: hook warns when all scoped mailbox candidates are occupied', (t) => {
+  const r = root(t);
+  const target = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  // Occupy bare + all 4 progressive candidates (4, 8, 12, full UUID)
+  leaseAcquire(r, 'claude', 'claude:11111111-1111-4111-8111-111111111111', ['pull'], 60000);
+  leaseAcquire(r, 'claude.dddd', 'claude:22222222-2222-4222-8222-222222222222', ['pull'], 60000);
+  leaseAcquire(r, 'claude.dddddddd', 'claude:33333333-3333-4333-8333-333333333333', ['pull'], 60000);
+  leaseAcquire(r, 'claude.dddddddd-ddd', 'claude:44444444-4444-4444-8444-444444444444', ['pull'], 60000);
+  leaseAcquire(r, `claude.${target}`, 'claude:55555555-5555-4555-8555-555555555555', ['pull'], 60000);
+  const hookPath = path.join(REPO, 'lib', 'hook.mjs');
+  const result = spawnSync(process.execPath, [hookPath, '--root', r, '--provider', 'claude'], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: target, prompt: 'hello', cwd: r }),
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const out = JSON.parse(result.stdout.trim());
+  const ctx = out.hookSpecificOutput?.additionalContext || '';
+  assert.match(ctx, /holds no mailbox/, 'hook warns about mailbox exhaustion');
+  const targetLeases = leaseList(r).filter(l => l.endpoint === `claude:${target}`);
+  assert.equal(targetLeases.length, 0, 'target session holds no mailbox');
+});
+
 test('roster shows working state and pending inbox per session', (t) => {
   const r = root(t);
   const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', r], { encoding: 'utf8' });
