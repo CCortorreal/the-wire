@@ -244,6 +244,14 @@ try {
         if (flags['--notice-reason']) env.noticeReason = flags['--notice-reason'];
         env.expectsResponse = false;
       }
+      // A send is not a status update. Surface an unfinished assignment on the
+      // same task so the sender can report its outcome instead of leaving stale
+      // work behind. This is advisory; a legitimate task message still sends.
+      const openIncoming = list(root, from).filter(m => m.envelope.to === from &&
+        m.envelope.kind === 'assignment' && m.envelope.task === env.task &&
+        !['completed', 'cancelled'].includes(m.work));
+      for (const m of openIncoming)
+        console.error(`the-wire: open incoming assignment on task ${env.task}: ${m.envelope.id} (state ${m.work}); send does not close it — report with status`);
       let enqueued, replaced = null;
       if (flags['--supersedes'] === 'auto') {
         const r = enqueueReplace(root, env);
@@ -253,7 +261,9 @@ try {
         enqueued = enqueue(root, env);
       }
       let dispatched = null; try { dispatched = dispatch(root, id, from); } catch {}
-      result = { enqueued, replaced, dispatched, meaning: dispatched?.delivery === 'accepted' ? 'Transport accepted the message. That is not receipt; check `read --id` for delivery=received.' : 'Transport did not confirm. The message is stored; the recipient pulls it on its next prompt (if its hook is installed) or a steward sweep re-wakes it.' };
+      result = { enqueued, replaced, dispatched,
+        openIncomingAssignments: openIncoming.map(m => ({ id: m.envelope.id, state: m.work })),
+        meaning: dispatched?.delivery === 'accepted' ? 'Transport accepted the message. That is not receipt; check `read --id` for delivery=received.' : 'Transport did not confirm. The message is stored; the recipient pulls it on its next prompt (if its hook is installed) or a steward sweep re-wakes it.' };
       break;
     }
     case 'enqueue': result = enqueue(root, stdinJson()); break;
