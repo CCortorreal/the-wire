@@ -112,3 +112,28 @@ test('lease --task-domain stores a domain capability; --domain rides on the assi
   assert.match(ctx, /^ACTION PENDING: 1 assignment/);
   assert.match(ctx, /WIRE codex:cccccccc[^\n]*domain minecraft\n→ assignment · task athena-resweep \(domain athena\) · from claude:aaaaaaaa[^\n]*done-state: report in state\/ · WRONG-CHAIR/);
 });
+
+test('send names an open incoming assignment on the same task without blocking the send', t => {
+  const p = root(t);
+  const assigned = send(p, 'assignment', 'same-task', 'Do the work', ['--done-state', 'work complete']);
+  assert.equal(assigned.status, 0, assigned.stderr);
+  const { envelope: { id }, hash } = JSON.parse(assigned.stdout).enqueued;
+  assert.equal(run(p, ['receive', '--id', id, '--as', codexA, '--hash', hash]).status, 0);
+  const outgoing = args => run(p, ['send', '--from', codexA, '--to', claude,
+    '--kind', 'notice', '--task', 'same-task', '--revision', 'abc1234', '--summary', 'FYI: local work is ongoing.', ...args]);
+  const warning = outgoing([]);
+  assert.equal(warning.status, 0, warning.stderr);
+  assert.match(warning.stderr, new RegExp(`open incoming assignment on task same-task: ${id} \\(state received\\)`));
+  assert.deepEqual(JSON.parse(warning.stdout).openIncomingAssignments, [{ id, state: 'received' }]);
+  const other = run(p, ['send', '--from', codexA, '--to', claude,
+    '--kind', 'notice', '--task', 'different-task', '--revision', 'abc1234', '--summary', 'FYI: unrelated status.']);
+  assert.equal(other.status, 0, other.stderr);
+  assert.equal(JSON.parse(other.stdout).openIncomingAssignments.length, 0);
+  const complete = run(p, ['status', '--id', id, '--as', codexA, '--state', 'completed', '--revision', 'abc1234'],
+    JSON.stringify({ summary: 'work complete', references: [] }));
+  assert.equal(complete.status, 0, complete.stderr);
+  const after = outgoing([]);
+  assert.equal(after.status, 0, after.stderr);
+  assert.equal(JSON.parse(after.stdout).openIncomingAssignments.length, 0);
+  assert.doesNotMatch(after.stderr, /open incoming assignment/);
+});
