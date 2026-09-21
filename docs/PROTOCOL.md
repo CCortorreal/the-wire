@@ -74,9 +74,15 @@ there is no automatic retry at this layer, so a crash between claim and record c
 a duplicate send.
 
 The **steward** (`the-wire steward`, run every minute from a scheduler) dispatches `pending`
-messages and re-wakes `unconfirmed`/`attempting` ones with backoff (5s, 30s, 120s; 3 re-wakes
-max). Re-wakes call the driver directly and never modify delivery state. It wakes the envelope's
-exact addressee — never a re-resolved lease holder.
+messages and re-wakes `unconfirmed`/`attempting` ones with backoff: three fast re-wakes (5s, 30s,
+120s), then a slow phase of one re-wake every 5 minutes for up to 12 more (about an hour), then it
+stops for good (2026-09-21; FIELD-NOTES §18). Re-wakes call the driver directly and never modify
+delivery state. It wakes the envelope's exact addressee — never a re-resolved lease holder.
+
+The hook also runs on the host's **Stop** (end-of-turn) event when installed there: it pulls once,
+and if anything new is addressed to this session it blocks the stop once with the inbox summary as
+the reason, so the seat reads it in the same turn instead of at the human's next prompt. With
+`stop_hook_active` set it does nothing (bounded), and an empty pull is silent.
 
 ## Pull, cursors, and the hook
 

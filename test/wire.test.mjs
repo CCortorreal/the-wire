@@ -343,6 +343,39 @@ test('steward: dispatches pending once, re-wakes unconfirmed with a cap, never t
   assert.equal(get(p, m.envelope.id).delivery, 'unconfirmed');
   assert.equal(wakes[0], to.split(':')[1], 'wakes the exact addressee');
 });
+test('steward slow phase (FIELD-NOTES §18): after three fast re-wakes, one every five minutes up to twelve more, then silence', t => {
+  const p = root(t), m = enqueue(p, msg());
+  const opts = { dispatch: (r, id, actor) => dispatch(r, id, actor, () => ({ status: 1 })), wake: () => ({ delivered: false }) };
+  sweep(p, opts);
+  const logFile = path.join(stateDir(p), 'wake.log');
+  const plant = entries => fs.writeFileSync(logFile, entries.map(e => JSON.stringify({ op: 'rewake', id: m.envelope.id, provider: 'claude', ok: true, ...e })).join('\n') + '\n');
+  const ago = ms => new Date(Date.now() - ms).toISOString();
+  plant([{ n: 1, ts: ago(600000) }, { n: 2, ts: ago(500000) }, { n: 3, ts: ago(60000) }]);
+  assert.deepEqual(sweep(p, opts), [], 'one minute after the third fast re-wake: the slow phase waits');
+  plant([{ n: 1, ts: ago(900000) }, { n: 2, ts: ago(800000) }, { n: 3, ts: ago(310000) }]);
+  assert.deepEqual(sweep(p, opts).map(r => r.op), ['rewake'], 'five minutes on: a slow re-wake');
+  assert.equal(JSON.parse(fs.readFileSync(logFile, 'utf8').trim().split('\n').at(-1)).n, 4);
+  plant(Array.from({ length: 15 }, (_, i) => ({ n: i + 1, ts: ago((16 - i) * 600000) })));
+  assert.deepEqual(sweep(p, opts), [], 'fifteen re-wakes total: the steward stops for good');
+  assert.equal(get(p, m.envelope.id).delivery, 'unconfirmed', 'delivery state untouched throughout');
+});
+test('Stop-event pull (FIELD-NOTES §18): blocks once with the new inbox as the reason, silent when nothing is new, inert under stop_hook_active', t => {
+  const r = root(t);
+  const hook = path.join(REPO, 'lib', 'hook.mjs');
+  const session = '22222222-2222-4222-8222-222222222222';
+  const run = (extra = {}) => { const x = spawnSync(process.execPath, [hook, '--root', r, '--provider', 'claude'], { input: JSON.stringify({ hook_event_name: 'Stop', session_id: session, cwd: r, stop_hook_active: false, ...extra }), encoding: 'utf8' }); assert.equal(x.status, 0, x.stderr); return JSON.parse(x.stdout.trim()); };
+  assert.deepEqual(run(), {}, 'empty inbox: silent');
+  const m = enqueue(r, msg({ kind: 'notice', summary: 'Phase complete; local commits only, nothing to do' }));
+  assert.deepEqual(run({ stop_hook_active: true }), {}, 'stop_hook_active: no pull, no block');
+  assert.equal(get(r, m.envelope.id).delivery, 'pending', 'and the message is still unreceived');
+  const blocked = run();
+  assert.equal(blocked.decision, 'block');
+  assert.match(blocked.reason, /WIRE end-of-turn pull: 1 new message/);
+  assert.match(blocked.reason, new RegExp(m.envelope.id));
+  assert.match(blocked.reason, /never resend/);
+  assert.equal(get(r, m.envelope.id).delivery, 'received', 'the Stop pull records receipt like the prompt pull');
+  assert.deepEqual(run(), {}, 'a second Stop sees nothing new');
+});
 test('health + archive: refuses with outstanding work, preserves sequences and leases', t => {
   const p = root(t), m = enqueue(p, msg());
   leaseAcquire(p, 'claude', to, [], 60000);

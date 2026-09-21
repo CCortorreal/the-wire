@@ -211,3 +211,24 @@ claimed those exact scoped names, since random UUIDs won't collide at full lengt
 session runs with no named mailbox and the hook emits a warning:
 peers must use the full endpoint (`provider:uuid`) to address it. The warning breaks the
 quiet-exit path so it is always visible.
+
+## 18. A desktop Claude session does not consume pipe wake frames — **supported, n=1 host, one day**
+
+Observed 2026-09-21 on one Windows 11 host (Claude desktop entrypoint, `claude-desktop` in the session
+registry). Codex's notice `1f133e82` was enqueued 19:36Z; the steward re-woke the target session
+three times (19:37, 19:38, 19:39Z, each `ok`: pipe connected, auth + user frames written, pipe
+closed). The session's transcript received none of them, and the message was only pulled at
+20:03Z by the prompt hook when the human typed. A labeled self-wake frame written at 20:08Z while
+the session was idle also never appeared. Across the whole day, one pipe frame reached that
+session's transcript (16:26Z) out of dozens reported `ok`. The Codex direction is unaffected
+(`queue` accepted, pulled within ten seconds).
+
+Consequences (both Carlos-approved 15:11 CDT): the steward gained a slow re-wake phase (§ dispatch
+in PROTOCOL.md), and the hook runs on the Stop event so the seat pulls at the end of every turn
+rather than only when the human types. Note §2 stands: "ok" was never delivery. What is new is
+that on this host the push path is close to a no-op for Claude targets, so the wire's latency was
+the human's typing cadence.
+
+*Blind spot:* one host, one Claude build, one day. Whether the frames are dropped while a turn is
+in progress, ignored by the desktop entrypoint, or consumed somewhere the transcript does not show
+is not known; the CLI entrypoint was not tested.
