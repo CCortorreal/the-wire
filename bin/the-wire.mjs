@@ -18,7 +18,7 @@ import { repair } from '../lib/store.mjs';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json|new-summary)$/;
+const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json|new-summary|done-state|notice-reason|domain|task-domain)$/;
 const USAGE = `the-wire <verb> --root <shared-root> [flags]
 
   doctor    [--provider claude|codex]       check provider capabilities and the state dir
@@ -29,6 +29,10 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   roster    [--provider claude|codex]      all active sessions grouped by provider, with their mailbox names
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
             --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>|auto] [--reply-to <mailbox|endpoint>] [--in-reply-to <message-id>] [--references a,b]
+            assignment: --done-state "<what the recipient reports when done>" (required) [--domain <task-domain>]
+            notice:     refused when the summary reads like an ask, unless --notice-reason "<why no reply is needed>"
+            a bare --to codex|claude is refused when >1 session of that provider is live; the resolution is printed
+  lease acquire … [--task-domain <name>]   bind this session to a task domain (assignments for another domain are flagged WRONG-CHAIR)
   enqueue   (JSON envelope on stdin)       lower-level: store without dispatching
   dispatch  --id <uuid> --as <endpoint>    one durable transport attempt
   inbox     --as <endpoint>                pull new messages for this exact session (marks them received)
@@ -68,13 +72,38 @@ try {
     if (!value) throw Error(`${label} required`);
     if (value.includes(':')) return endpoint(value);
     const resolved = leaseResolve(root, value);
-    if (resolved) return resolved;
+    if (resolved) {
+      // Wire grammar (2026-09-21): a bare provider name is refused when more than one session of that
+      // provider is live (the 2026-09-16 wrong-mailbox send, wire 59162a8a); the resolution is printed.
+      if (PROVIDERS.includes(value)) {
+        const live = leasesByPrefix(root, value);
+        const endpoints = [...new Set(live.map(a => a.endpoint))];
+        if (endpoints.length > 1) throw Error(`${label} "${value}" is ambiguous: ${endpoints.length} live ${value} sessions — ${live.map(a => `${a.mailbox}=${a.endpoint}`).join(', ')}. Address the exact endpoint or the scoped mailbox.`);
+      }
+      console.error(`the-wire: ${label} "${value}" → ${resolved}`);
+      return resolved;
+    }
     const prefix = PROVIDERS.find(p => value === p || value.startsWith(p + '.'));
     if (prefix) {
       const available = leasesByPrefix(root, prefix);
       if (available.length) throw Error(`No live lease for mailbox "${value}". Active ${prefix} mailboxes: ${available.map(a => a.mailbox).join(', ')}. Use --to <mailbox> to address a specific session.`);
     }
     throw Error(`No live lease for mailbox "${value}". The ${value} session must run: the-wire lease acquire --mailbox ${value} --as <provider>:<session uuid>`);
+  };
+  // Does a notice summary read like an ask? Quoted text is stripped first (a quoted question is not an
+  // ask to the peer). Returns the reason string, or null. Regex is the detector; the structured
+  // --done-state / --notice-reason fields are the proof (Codex review, proposal-review.md A1).
+  const noticeReadsLikeAsk = text => {
+    const bare = text.replace(/"[^"]*"|“[^”]*”|`[^`]*`|(?:^|\s)'[^']*'(?=[\s.,;:]|$)/g, ' ');
+    const patterns = [
+      [/\?/, 'a question mark'],
+      [/\b(please|can you|could you|would you|need you to|drop (?:me|us)?\s?a (?:notice|line|note)|send me|report back|get back to me|let me know|your call|when you have|once you have)\b/i, 'an ask addressed to the peer'],
+      [/\b(proposed split|your (?:side|slice|half|lane|strength|part)|bank (?:findings|notes|results)|(?:need|needs|want|requesting|request|for) (?:a |your )?(?:second[- ]read|blind[- ]spot pass)|verdict requested|findings requested|return a verdict)\b/i, 'a work split or review request'],
+      [/\b(review|check|verify|audit|test|confirm|bank)\s+(this|the|my|it|that|these|those|each|all|both)\b/i, 'an imperative to the peer'],
+      [/\bdone[- ]state\b/i, 'a done-state'],
+    ];
+    for (const [re, why] of patterns) { const m = bare.match(re); if (m) return `${why}: "${m[0]}"`; }
+    return null;
   };
   const gitRevision = () => { const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true }); return r.status === 0 ? r.stdout.trim() : 'unversioned'; };
   let result;
@@ -168,7 +197,10 @@ try {
       const box = flags['--mailbox'], as = flags['--as'], ttl = flags['--ttl'] ? Number(flags['--ttl']) : LEASE_MS, fence = flags['--fence'] ? Number(flags['--fence']) : undefined;
       if (op === 'list') { result = leaseList(root); break; }
       if (!box) throw Error('--mailbox required');
-      if (op === 'acquire') result = leaseAcquire(root, box, endpoint(as), ['pull', 'context'], ttl);
+      // --task-domain <name> binds this lease to a task domain (capability `domain:<name>`); the receive
+      // hook flags an assignment carrying a different --domain as WRONG-CHAIR (2026-09-16 case, Codex #3).
+      const caps = ['pull', 'context', ...(flags['--task-domain'] ? ['domain:' + flags['--task-domain']] : [])];
+      if (op === 'acquire') result = leaseAcquire(root, box, endpoint(as), caps, ttl);
       else if (op === 'renew') { if (!fence) throw Error('--fence required'); result = leaseRenew(root, box, fence, ttl); }
       else if (op === 'release') { if (!fence) throw Error('--fence required'); result = leaseRelease(root, box, fence); }
       else throw Error('lease acquire|renew|release|list');
@@ -195,6 +227,23 @@ try {
       const replyTo = flags['--reply-to'] ? resolveAddress(flags['--reply-to'], '--reply-to') : undefined;
       const revision = flags['--revision'] || (inReplyEnvelope ? inReplyEnvelope.revision : gitRevision());
       const env = { id, from, to, kind: flags['--kind'], task: flags['--task'], revision, summary: `WIRE-ID: ${id}. ${summary}`, references: flags['--references'] ? flags['--references'].split(',') : [], replyTo };
+      // ── Wire grammar (2026-09-21 session review, proposal-v2 item 1) ──
+      // assignment = work with a done-state → --done-state is required and stored (expectsResponse: true).
+      // notice = information → refused when the summary reads like an ask, unless --notice-reason says
+      // why no reply is needed (stored on the envelope for the next review). A blocked recipient gets
+      // `resubmit`, never a fresh assignment. Real cases: 807f213f, b93a8ad0 (work sent as notices).
+      if (env.kind === 'assignment') {
+        if (!flags['--done-state']) throw Error('assignment requires --done-state "<what the recipient reports when done>" — the structured field is the proof it is work, not information');
+        env.doneState = flags['--done-state']; env.expectsResponse = true;
+        if (flags['--domain']) env.domain = flags['--domain'];
+        const active = activeAssignment(root, to);
+        if (active && active.work === 'blocked') throw Error(`Recipient has a blocked assignment ${active.envelope.id} (${active.envelope.task}). Do not send a fresh one — the-wire resubmit --id ${active.envelope.id} --as ${from} --revision <rev> --root <root>`);
+      } else {
+        const ask = noticeReadsLikeAsk(summary);
+        if (ask && !flags['--notice-reason']) throw Error(`notice reads like an ask (${ask}). A notice needs no reply: send --kind assignment with --done-state, or add --notice-reason "<why no reply is needed>"`);
+        if (flags['--notice-reason']) env.noticeReason = flags['--notice-reason'];
+        env.expectsResponse = false;
+      }
       let enqueued, replaced = null;
       if (flags['--supersedes'] === 'auto') {
         const r = enqueueReplace(root, env);

@@ -365,7 +365,7 @@ test('CLI end to end: lease → send by mailbox name → inbox → status → he
   const claude = 'claude:11111111-1111-4111-8111-111111111111', codex = 'codex:22222222-2222-4222-8222-222222222222';
   cli(['lease', 'acquire', '--mailbox', 'claude', '--as', claude]);
   cli(['lease', 'acquire', '--mailbox', 'codex', '--as', codex]);
-  const sent = cli(['send', '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--task', 'canary', '--summary', 'CANARY 1', '--revision', 'r1']);
+  const sent = cli(['send', '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--done-state', 'done', '--task', 'canary', '--summary', 'CANARY 1', '--revision', 'r1']);
   assert.equal(sent.enqueued.envelope.from, claude); assert.equal(sent.enqueued.envelope.to, codex);
   assert.match(sent.enqueued.envelope.summary, /^WIRE-ID: [0-9a-f-]{36}\. CANARY 1$/);
   assert.equal(sent.dispatched.delivery, 'accepted');
@@ -388,7 +388,7 @@ test('CLI send --reply-to redirects return notice to a different session', t => 
   cli(['lease', 'acquire', '--mailbox', 'claude.desk', '--as', desk]);
   cli(['lease', 'acquire', '--mailbox', 'claude.minecraft', '--as', minecraft]);
   cli(['lease', 'acquire', '--mailbox', 'codex', '--as', codex]);
-  const sent = cli(['send', '--from', 'claude.desk', '--to', 'codex', '--kind', 'assignment', '--task', 'review', '--summary', 'Review arch', '--revision', 'r1', '--reply-to', 'claude.minecraft']);
+  const sent = cli(['send', '--from', 'claude.desk', '--to', 'codex', '--kind', 'assignment', '--done-state', 'done', '--task', 'review', '--summary', 'Review arch', '--revision', 'r1', '--reply-to', 'claude.minecraft']);
   assert.equal(sent.enqueued.envelope.replyTo, minecraft);
   cli(['inbox', '--as', codex]);
   const st = cli(['status', '--id', sent.enqueued.envelope.id, '--as', codex, '--state', 'completed', '--revision', 'r1'], JSON.stringify({ summary: 'Done', references: [] }));
@@ -582,7 +582,7 @@ test('roster shows working state and pending inbox per session', (t) => {
   const claudeC = 'claude:cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   run('lease', 'acquire', '--mailbox', 'codex.worker', '--as', codexA);
   run('lease', 'acquire', '--mailbox', 'claude', '--as', claudeC);
-  const sent = run('send', '--from', 'claude', '--to', 'codex.worker', '--kind', 'assignment', '--task', 'heavy-lift', '--summary', 'do the thing', '--revision', 'abc');
+  const sent = run('send', '--from', 'claude', '--to', 'codex.worker', '--kind', 'assignment', '--done-state', 'done', '--task', 'heavy-lift', '--summary', 'do the thing', '--revision', 'abc');
   assert.equal(sent.status, 0, sent.stderr);
   const assignmentId = JSON.parse(sent.stdout).enqueued.envelope.id;
   const roster = run('roster');
@@ -639,7 +639,7 @@ test('CLI send --supersedes auto replaces active assignment without knowing its 
   leaseAcquire(r, 'claude', from, ['pull', 'context'], 60000);
   leaseAcquire(r, 'codex', to, ['pull', 'context'], 60000);
   const send = (task, supersedes) => {
-    const args = [CLI, 'send', '--root', r, '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--task', task, '--summary', 'test', '--revision', 'abc'];
+    const args = [CLI, 'send', '--root', r, '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--done-state', 'done', '--task', task, '--summary', 'test', '--revision', 'abc'];
     if (supersedes) args.push('--supersedes', supersedes);
     return spawnSync(process.execPath, args, { encoding: 'utf8' });
   };
@@ -818,7 +818,7 @@ test('N×N CLI: named mailbox routing end-to-end through the CLI', t => {
 
   // Desk sends to codex.minecraft with replyTo claude.minecraft
   const send1 = run('send', '--from', 'claude.desk', '--to', 'codex.minecraft', '--reply-to', 'claude.minecraft',
-    '--kind', 'assignment', '--task', 'mc-build', '--summary', 'Build', '--revision', 'abc');
+    '--kind', 'assignment', '--done-state', 'done', '--task', 'mc-build', '--summary', 'Build', '--revision', 'abc');
   assert.equal(send1.status, 0, send1.stderr);
   const sent1 = JSON.parse(send1.stdout).enqueued;
   assert.equal(sent1.envelope.to, 'codex:33333333-3333-4333-8333-333333333333');
@@ -826,7 +826,7 @@ test('N×N CLI: named mailbox routing end-to-end through the CLI', t => {
 
   // Desk sends to codex.inflow (no replyTo — notice returns to desk)
   const send2 = run('send', '--from', 'claude.desk', '--to', 'codex.inflow',
-    '--kind', 'assignment', '--task', 'jd-fetch', '--summary', 'Fetch', '--revision', 'abc');
+    '--kind', 'assignment', '--done-state', 'done', '--task', 'jd-fetch', '--summary', 'Fetch', '--revision', 'abc');
   assert.equal(send2.status, 0, send2.stderr);
   const sent2 = JSON.parse(send2.stdout).enqueued;
   assert.equal(sent2.envelope.to, 'codex:44444444-4444-4444-8444-444444444444');
@@ -1010,7 +1010,7 @@ test('CLI resubmit requires blocked state, explicit revision, and only original 
   leaseAcquire(r, 'codex', to, ['pull', 'context'], 60000);
   const run = (...args) => spawnSync(process.execPath, [CLI, ...args, '--root', r], { encoding: 'utf8' });
   // Send initial assignment
-  const s1 = run('send', '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--task', 'review-work', '--summary', 'Please review', '--revision', 'abc');
+  const s1 = run('send', '--from', 'claude', '--to', 'codex', '--kind', 'assignment', '--done-state', 'done', '--task', 'review-work', '--summary', 'Please review', '--revision', 'abc');
   assert.equal(s1.status, 0, s1.stderr);
   const origId = JSON.parse(s1.stdout).enqueued.envelope.id;
   // Cannot resubmit without --revision
