@@ -100,11 +100,45 @@ The cleanest way to bring the second agent up was to paste the *same* human prom
 Each one then found the other by matching that prompt in the peer's transcript — which is exactly
 the guess the-wire replaces with leases: the agent that leased `codex` is the one you mean.
 
-## 11. Caps — **established**
+## 11. Caps and recovery
 
-Summaries: 1200 chars. Status summaries: 1000. Log: 100 messages / 256 KB. These bit the authors
-within the first hour of real use. They are deliberate: the wire carries decisions and pointers;
+Default summaries: 4000 chars. Status summaries: 4000. Log: 500 messages / 2 MB. These replace the previous 1200/1000-character and 100-message / 256 KB defaults.
+The limits are configurable; the wire carries decisions and pointers;
 the repo carries the work.
+
+Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
+
+Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.
+
+Rolling archive removes eligible closed work while keeping open messages; send triggers it at 90% of either log cap. Read by ID also searches archived records.
+
+
+Limits come from optional `.wire/config.json` (missing keys use defaults):
+
+```json
+{"maxMessages":500,"maxBytes":2097152,"maxText":4000,"maxStatus":4000}
+```
+
+Values must be positive integers; unknown keys are rejected. Maxima are 100000 messages,
+64 MiB, and 1000000 characters per text/status field. `health` reports effective limits and
+serialized UTF-8 bytes. Legacy `wire.json` needs no migration. Lowering write limits does
+not prevent reading an existing live log or archive up to 64 MiB. Generated WIRE-ID and
+status-return prefixes do not consume the user text budget. Secret checks still apply.
+
+
+`the-wire who` lists known endpoints, their mailboxes (including expired ones), lease ages
+in milliseconds, and last seen timestamps from lease heartbeats or local session events.
+An endpoint known only from a message has no mailbox and a null last-seen value. This is
+a local directory, not proof that a session is running. `send --from`, `--to` and `--reply-to`
+accept unique `provider:uuid-prefix` addresses; an ambiguous prefix fails with every matching
+endpoint and its mailbox names. A full endpoint remains valid without a lease.
+
+
+Ask-shaped notice text (questions, review requests, or similar phrasing) produces an advisory
+warning on stderr and in the successful send result, never a refusal. The envelope remains a
+notice with `expectsResponse: false`. Optional `--notice-reason` records context. Use an
+assignment with required `--done-state` when the recipient owes work; normal validation,
+addressing and capacity failures still reject sends.
 
 ## 12. POSIX behavior is a design reading, not a port — **suspected**
 

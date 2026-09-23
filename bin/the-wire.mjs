@@ -8,17 +8,17 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROVIDERS, endpoint, enqueue, enqueueReplace, get, list, receive, status, resubmit as storeResubmit, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
+import { PROVIDERS, who, resolveEndpointPrefix, operatorCancel, endpoint, enqueue, enqueueReplace, get, list, receive, status, resubmit as storeResubmit, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
 import { sweep, acquireLock, releaseLock } from '../lib/steward.mjs';
-import { repair } from '../lib/store.mjs';
+import { repair, wireConfig } from '../lib/store.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json|new-summary|done-state|notice-reason|domain|task-domain)$/;
+const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json|new-summary|done-state|notice-reason|domain|task-domain|operator|reason)$/;
 const USAGE = `the-wire <verb> --root <shared-root> [flags]
 
   doctor    [--provider claude|codex]       check provider capabilities and the state dir
@@ -26,11 +26,12 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   install   --provider claude|codex        copy the skill into your provider's skill dir; print the hook snippet
   resubmit  --id <uuid> --as <endpoint>   turn a blocked review into a superseding assignment (bumps task version)
   lease     acquire|renew|release|list     --mailbox <name> --as <provider:uuid> [--ttl ms] [--fence n]
+  who                                      endpoint directory: mailboxes, lease age and last seen
   roster    [--provider claude|codex]      all active sessions grouped by provider, with their mailbox names
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
             --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>|auto] [--reply-to <mailbox|endpoint>] [--in-reply-to <message-id>] [--references a,b]
             assignment: --done-state "<what the recipient reports when done>" (required) [--domain <task-domain>]
-            notice:     refused when the summary reads like an ask, unless --notice-reason "<why no reply is needed>"
+            notice:     warns on success when the summary reads like an ask; optional --notice-reason "<why no reply is needed>"
             a bare --to codex|claude is refused when >1 session of that provider is live; the resolution is printed
   lease acquire … [--task-domain <name>]   bind this session to a task domain (assignments for another domain are flagged WRONG-CHAIR)
   enqueue   (JSON envelope on stdin)       lower-level: store without dispatching
@@ -41,6 +42,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   receive   --id <uuid> --as <endpoint> --hash <sha256>
   status    --id <uuid> --as <endpoint> --state working|blocked|completed|cancelled --revision <rev>
             ({"summary":"...","references":[...]} on stdin)
+  cancel    --id <uuid> --operator carlos --reason "<text>"  recover an assignment without a live sender lease
   health
   repair                                   fix stale locks, orphaned temps, restore corrupt state from backup
   archive
@@ -67,10 +69,10 @@ try {
   if (!verb || verb === 'help' || verb === '--help') { console.log(USAGE); process.exit(0); }
   if (!flags['--root']) throw Error('Explicit --root <shared-root> required (the directory both sessions work in)');
   const root = path.resolve(flags['--root']);
-  const stdinJson = () => { const b = fs.readFileSync(0); if (b.length > 16384) throw Error('Input too large'); return JSON.parse(b.toString('utf8').replace(/^﻿/, '')); };
+  const stdinJson = () => { const limits = wireConfig(root); const b = fs.readFileSync(0); if (b.length > 6 * (3 * limits.maxText + limits.maxStatus) + 32768) throw Error('Input too large'); return JSON.parse(b.toString('utf8').replace(/^﻿/, '')); };
   const resolveAddress = (value, label) => {
     if (!value) throw Error(`${label} required`);
-    if (value.includes(':')) return endpoint(value);
+    if (value.includes(':')) return resolveEndpointPrefix(root, value);
     const resolved = leaseResolve(root, value);
     if (resolved) {
       // Wire grammar (2026-09-21): a bare provider name is refused when more than one session of that
@@ -229,9 +231,10 @@ try {
       const env = { id, from, to, kind: flags['--kind'], task: flags['--task'], revision, summary: `WIRE-ID: ${id}. ${summary}`, references: flags['--references'] ? flags['--references'].split(',') : [], replyTo };
       // ── Wire grammar (2026-09-21 session review, proposal-v2 item 1) ──
       // assignment = work with a done-state → --done-state is required and stored (expectsResponse: true).
-      // notice = information → refused when the summary reads like an ask, unless --notice-reason says
-      // why no reply is needed (stored on the envelope for the next review). A blocked recipient gets
+      // notice = information; ask-shaped text is advisory, and --notice-reason can record context.
+      // Warnings are emitted only after storage succeeds. A blocked recipient gets
       // `resubmit`, never a fresh assignment. Real cases: 807f213f, b93a8ad0 (work sent as notices).
+      const warnings = [];
       if (env.kind === 'assignment') {
         if (!flags['--done-state']) throw Error('assignment requires --done-state "<what the recipient reports when done>" — the structured field is the proof it is work, not information');
         env.doneState = flags['--done-state']; env.expectsResponse = true;
@@ -240,7 +243,7 @@ try {
         if (active && active.work === 'blocked') throw Error(`Recipient has a blocked assignment ${active.envelope.id} (${active.envelope.task}). Do not send a fresh one — the-wire resubmit --id ${active.envelope.id} --as ${from} --revision <rev> --root <root>`);
       } else {
         const ask = noticeReadsLikeAsk(summary);
-        if (ask && !flags['--notice-reason']) throw Error(`notice reads like an ask (${ask}). A notice needs no reply: send --kind assignment with --done-state, or add --notice-reason "<why no reply is needed>"`);
+        if (ask) warnings.push(`notice reads like an ask (${ask}). Notices need no reply; use an assignment with --done-state when you expect work.`);
         if (flags['--notice-reason']) env.noticeReason = flags['--notice-reason'];
         env.expectsResponse = false;
       }
@@ -261,9 +264,10 @@ try {
         enqueued = enqueue(root, env);
       }
       let dispatched = null; try { dispatched = dispatch(root, id, from); } catch {}
-      result = { enqueued, replaced, dispatched,
+      result = { enqueued, replaced, dispatched, warnings,
         openIncomingAssignments: openIncoming.map(m => ({ id: m.envelope.id, state: m.work })),
         meaning: dispatched?.delivery === 'accepted' ? 'Transport accepted the message. That is not receipt; check `read --id` for delivery=received.' : 'Transport did not confirm. The message is stored; the recipient pulls it on its next prompt (if its hook is installed) or a steward sweep re-wakes it.' };
+      for (const warning of warnings) console.error(`the-wire: warning: ${warning}`);
       break;
     }
     case 'enqueue': result = enqueue(root, stdinJson()); break;
@@ -275,9 +279,10 @@ try {
     case 'status': {
       const detail = stdinJson();
       result = status(root, flags['--id'], flags['--as'], flags['--state'], flags['--revision'], detail.summary, detail.references);
-      if (result.notice) { const n = get(root, result.notice); result.notification = n.delivery === 'pending' ? dispatch(root, result.notice, flags['--as']) : n; }
+      if (result.notice) { const n = get(root, result.notice); result.notification = n.delivery === 'pending' && !n.archive ? dispatch(root, result.notice, flags['--as']) : n; }
       break;
     }
+    case 'who': result = { sessions: who(root) }; break;
     case 'roster': {
       const requested = flags['--provider'];
       if (requested && !PROVIDERS.includes(requested)) throw Error('--provider claude|codex required');
@@ -307,6 +312,7 @@ try {
       result = { providers: groups, total: leases.length };
       break;
     }
+    case 'cancel': result = operatorCancel(root, flags['--id'], flags['--operator'], flags['--reason']); break;
     case 'health': result = wireHealth(root); break;
     case 'repair': result = repair(root); break;
     case 'archive': result = archive(root); break;

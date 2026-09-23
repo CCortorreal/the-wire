@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto, { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { enqueue, enqueueReplace, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, status, resubmit as storeResubmit, observePrompt, context, notification, wireHealth, archive, endpoint, WIRE_CAPACITY } from '../lib/wire-store.mjs';
+import { enqueue, enqueueReplace, get, list, beginAttempt, finishAttempt, receive, pull, cursorRead, cursorClaim, cursorComplete, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, status, resubmit as storeResubmit, observePrompt, context, notification, wireHealth, archive, endpoint } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { wake as codexWake, codexBin, probeCodex, parseQueueAcceptance } from '../lib/drivers/codex-queue.mjs';
 import { sweep } from '../lib/steward.mjs';
@@ -16,7 +16,8 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(REPO, 'bin', 'the-wire.mjs');
 const from = 'codex:11111111-1111-4111-8111-111111111111';
 const to = 'claude:22222222-2222-4222-8222-222222222222';
-const root = t => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'the-wire-test-')); t.after(() => fs.rmSync(p, { recursive: true, force: true })); return p; };
+const WIRE_CAPACITY = 100;
+const root = t => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'the-wire-test-')); fs.mkdirSync(path.join(p,'.wire')); fs.writeFileSync(path.join(p,'.wire/config.json'),JSON.stringify({maxMessages:WIRE_CAPACITY})); t.after(() => fs.rmSync(p, { recursive: true, force: true })); return p; };
 const msg = (o = {}) => ({ id: randomUUID(), from, to, task: 'test', revision: 'abc123', kind: 'assignment', summary: 'Review the specified revision', references: ['docs/PROTOCOL.md'], ...o });
 const stubCodex = (dir, stdout) => { const f = path.join(dir, 'codex-stub.js'); fs.writeFileSync(f, `const a=process.argv.slice(2);const t=a[a.indexOf('--thread')+1];console.log(${JSON.stringify(stdout)}.replace('THREAD',t));`); return f; };
 
@@ -26,7 +27,7 @@ test('endpoints are exact provider:session-uuid', () => {
   assert.throws(() => endpoint('gemini:11111111-1111-4111-8111-111111111111'), /claude\|codex/);
 });
 test('text and reference validation fail closed', () => {
-  assert.throws(() => validateText('x'.repeat(1201)), /1200/);
+  assert.throws(() => validateText('x'.repeat(4001)), /4000/);
   assert.throws(() => validateText('password=hunter2'), /Sensitive/);
   assert.throws(() => validateText('token ghp_abcdefghijklmnopqrstuvwxyz'), /Sensitive/);
   assert.deepEqual(validateReferences(['src/a.mjs:12', 'docs/x.md']), ['src/a.mjs:12', 'docs/x.md']);
@@ -376,17 +377,18 @@ test('Stop-event pull (FIELD-NOTES §18): blocks once with the new inbox as the 
   assert.equal(get(r, m.envelope.id).delivery, 'received', 'the Stop pull records receipt like the prompt pull');
   assert.deepEqual(run(), {}, 'a second Stop sees nothing new');
 });
-test('health + archive: refuses with outstanding work, preserves sequences and leases', t => {
+test('health + archive: retains outstanding work, preserves sequences and leases', t => {
   const p = root(t), m = enqueue(p, msg());
   leaseAcquire(p, 'claude', to, [], 60000);
   assert.equal(wireHealth(p).archiveReady, false);
-  assert.throws(() => archive(p), /outstanding/);
+  assert.equal(archive(p).retained, 1);
   receive(p, m.envelope.id, to, m.hash);
   const done = status(p, m.envelope.id, to, 'completed', 'abc123', 'ok');
-  assert.throws(() => archive(p), /unsent notice/);
+  assert.equal(archive(p).messages, 1);
+  assert.equal(list(p).length, 1);
   receive(p, done.notice, from, get(p, done.notice).hash);
   const r = archive(p);
-  assert.equal(r.messages, 2); assert.equal(list(p).length, 0);
+  assert.equal(r.messages, 1); assert.equal(list(p).length, 0);
   assert.ok(fs.existsSync(path.join(p, r.archive)));
   assert.equal(enqueue(p, msg()).seq, 2, 'sequence continues after archive');
   assert.equal(leaseResolve(p, 'claude'), to, 'leases survive archive');

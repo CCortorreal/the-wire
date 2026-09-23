@@ -41,16 +41,19 @@ test('assignment without --done-state is refused; with it the envelope carries d
   assert.equal(e.expectsResponse, true);
 });
 
-test('real notices that were work are refused as notices (807f213f, b93a8ad0, 59162a8a)', t => {
+test('real ask-shaped notices succeed with advisory warnings (807f213f, b93a8ad0, 59162a8a)', t => {
   const p = root(t);
   for (const [task, text] of [['mc-night-research-2026-09-20', N_807f213f], ['redwood-board-next-evolution', N_b93a8ad0], ['calliope-minecraft-wire', N_59162a8a]]) {
     const r = send(p, 'notice', task, text);
-    assert.equal(r.status, 1, `${task} should be refused as a notice`);
+    assert.equal(r.status, 0, r.stderr);
+    const stored = JSON.parse(r.stdout);
+    assert.equal(get(p, stored.enqueued.envelope.id).envelope.kind, 'notice');
+    assert.equal(stored.warnings.length, 1);
     assert.match(r.stderr, /reads like an ask/);
   }
 });
 
-test('--notice-reason overrides and is stored on the envelope; expectsResponse is false', t => {
+test('--notice-reason is optional context and is stored on the envelope; expectsResponse is false', t => {
   const p = root(t);
   const r = send(p, 'notice', 'redwood-board-next-evolution', N_b93a8ad0, ['--notice-reason', 'FYI only; Carlos answers in-world']);
   assert.equal(r.status, 0, r.stderr);
@@ -136,4 +139,22 @@ test('send names an open incoming assignment on the same task without blocking t
   assert.equal(after.status, 0, after.stderr);
   assert.equal(JSON.parse(after.stdout).openIncomingAssignments.length, 0);
   assert.doesNotMatch(after.stderr, /open incoming assignment/);
+});
+
+test('notice warnings are emitted only after successful storage; validation still refuses secrets', t => {
+  const p = root(t);
+  const rejected = send(p, 'notice', 'secret', 'Can you use password=unsafe');
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /Sensitive/);
+  assert.doesNotMatch(rejected.stderr, /warning: notice reads like an ask/);
+  const accepted = send(p, 'notice', 'warning', 'Can you review the draft?');
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stderr, /warning: notice reads like an ask/);
+  const result = JSON.parse(accepted.stdout);
+  assert.equal(result.enqueued.envelope.expectsResponse, false);
+  assert.equal(result.warnings.length, 1);
+  const plain = send(p, 'notice', 'plain', 'FYI: draft stored.');
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.deepEqual(JSON.parse(plain.stdout).warnings, []);
+  assert.doesNotMatch(plain.stderr, /warning: notice/);
 });
