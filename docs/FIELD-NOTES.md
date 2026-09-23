@@ -110,6 +110,8 @@ Assignments older than 24 hours can be archived as `orphaned` only when their se
 
 Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.
 
+Rolling archive removes eligible closed work while keeping open messages; send triggers it at 90% of either log cap. Read by ID also searches archived records.
+
 ## 12. POSIX behavior is a design reading, not a port — **suspected**
 
 The file-backed broker uses Node filesystem primitives that exist on macOS and Linux, and the

@@ -30,7 +30,7 @@ test('orphan reap requires old assignment, absent sender lease and absent recent
       assert.equal(saved.messages[0].hash, m.hash);
     } else {
       assert.equal(wireHealth(p, now).archivableOrphanedAssignments, 0);
-      assert.throws(() => archive(p, now), /outstanding assignment/);
+      assert.equal(archive(p, now).retained, 1);
     }
   }
 });
@@ -77,4 +77,37 @@ test('operator cancel guards live sender, invalid operator/reason, terminal stat
   const r=root(t), o=enqueue(r,msg());
   operatorCancel(r,o.envelope.id,'carlos','exited');
   assert.throws(() => operatorCancel(r,o.envelope.id,'carlos','different'), /closed/);
+});
+
+import { list, pull, cursorRead } from '../lib/wire-store.mjs';
+test('rolling archive partitions mixed work, preserves cursors, hashes and ID deduplication', t => {
+  const p=root(t), open=enqueue(p,msg());
+  const done=enqueue(p,msg({kind:'notice'})); receive(p,done.envelope.id,to,done.hash);
+  const pending=enqueue(p,msg({kind:'notice'}));
+  const before=cursorRead(p,to);
+  const r=archive(p);
+  assert.equal(r.messages,1); assert.equal(r.retained,2);
+  assert.deepEqual(list(p).map(m=>m.envelope.id),[open.envelope.id,pending.envelope.id]);
+  assert.deepEqual(cursorRead(p,to),before);
+  assert.equal(get(p,done.envelope.id).hash,done.hash);
+  assert.equal(enqueue(p,done.envelope).hash,done.hash);
+  assert.equal(list(p).length,2);
+  assert.throws(()=>enqueue(p,{...done.envelope,summary:'changed'}),/reused/);
+  assert.equal(pull(p,to).at(-1).seq,pending.seq);
+  assert.equal(enqueue(p,msg({kind:'notice'})).seq,pending.seq+1);
+});
+test('send archives at ninety percent and leaves open assignment intact', t => {
+  const p=root(t), open=enqueue(p,msg());
+  for(let i=1;i<Math.ceil(WIRE_CAPACITY*0.9);i++) {const m=enqueue(p,msg({kind:'notice'}));receive(p,m.envelope.id,to,m.hash);}
+  assert.equal(wireHealth(p).used,Math.ceil(WIRE_CAPACITY*0.9));
+  const sent=enqueue(p,msg({kind:'notice'}));
+  assert.equal(wireHealth(p).used,2);
+  assert.equal(get(p,open.envelope.id).work,'queued');
+  assert.equal(sent.seq,Math.ceil(WIRE_CAPACITY*0.9)+1);
+});
+test('archive write failure never removes live messages', t => {
+  const p=root(t), m=enqueue(p,msg({kind:'notice'}));receive(p,m.envelope.id,to,m.hash);
+  fs.writeFileSync(path.join(p,'.wire/archive'),'not a directory');
+  assert.throws(()=>archive(p));
+  assert.equal(list(p)[0].hash,m.hash);
 });

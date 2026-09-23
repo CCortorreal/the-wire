@@ -104,11 +104,16 @@ receipt and never produces an acknowledgment — this is what prevents ACK loops
 
 ## Capacity and archive
 
-The log holds 100 messages / 256 KB and refuses additions beyond that. `archive` refuses while any
-assignment is non-terminal or any notice is unsent, with one exception: a notice older than 24 h
-whose recipient holds no live lease and has no recent session record is archived with an explicit
-`undelivered` disposition. The full log is copied to `.wire/archive/wire-<utc>.json`; sequences,
-cursors and leases survive the reset.
+The live log holds 100 messages / 256 KB. Rolling `archive` moves completed, cancelled,
+superseded and orphaned work to `.wire/archive/wire-<utc>-<unique>.json`, retaining open work.
+Notices older than 24 hours with no live recipient lease or recent session event are archived
+as `undelivered`. Assignments use the same inactivity test on the sender and become `orphaned`.
+Sequences, cursors and leases survive. No eligible messages means a no-op.
+Send automatically runs rolling archive at 90% of either live-log cap before insertion.
+Open work can still fill the log; capacity then refuses the send without losing it.
+`read --id` can read archived records; retrying an archived ID deduplicates against its hash.
+Archive is written before the live log is replaced: an interrupted commit may leave a duplicate
+archive copy, but never deletes the only copy of a message.
 
 ## Activation boundary
 

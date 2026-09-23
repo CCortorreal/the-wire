@@ -376,17 +376,18 @@ test('Stop-event pull (FIELD-NOTES §18): blocks once with the new inbox as the 
   assert.equal(get(r, m.envelope.id).delivery, 'received', 'the Stop pull records receipt like the prompt pull');
   assert.deepEqual(run(), {}, 'a second Stop sees nothing new');
 });
-test('health + archive: refuses with outstanding work, preserves sequences and leases', t => {
+test('health + archive: retains outstanding work, preserves sequences and leases', t => {
   const p = root(t), m = enqueue(p, msg());
   leaseAcquire(p, 'claude', to, [], 60000);
   assert.equal(wireHealth(p).archiveReady, false);
-  assert.throws(() => archive(p), /outstanding/);
+  assert.equal(archive(p).retained, 1);
   receive(p, m.envelope.id, to, m.hash);
   const done = status(p, m.envelope.id, to, 'completed', 'abc123', 'ok');
-  assert.throws(() => archive(p), /unsent notice/);
+  assert.equal(archive(p).messages, 1);
+  assert.equal(list(p).length, 1);
   receive(p, done.notice, from, get(p, done.notice).hash);
   const r = archive(p);
-  assert.equal(r.messages, 2); assert.equal(list(p).length, 0);
+  assert.equal(r.messages, 1); assert.equal(list(p).length, 0);
   assert.ok(fs.existsSync(path.join(p, r.archive)));
   assert.equal(enqueue(p, msg()).seq, 2, 'sequence continues after archive');
   assert.equal(leaseResolve(p, 'claude'), to, 'leases survive archive');

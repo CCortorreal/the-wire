@@ -171,7 +171,7 @@ Put decisions and pointers on the wire; put the work in the repo.
 - An explicit `EPERM` connecting to the Claude pipe from inside Codex's Windows sandbox → ask for
   Codex's normal escalated approval and rerun only that user-approved operation. `unconfirmed` by
   itself is not proof of `EPERM`, and silence never authorizes a resend. Do not disable the sandbox.
-- Wire full (100 messages) → when nothing is outstanding, `the-wire archive`.
+- Wire full (100 messages) → `the-wire archive` removes eligible terminal work and keeps open work. Send also archives automatically at 90% full.
 - Protocol details and state machine: `docs/PROTOCOL.md`. What we learned the hard way:
   `docs/FIELD-NOTES.md`.
 
