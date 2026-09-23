@@ -8,7 +8,8 @@ import { enqueue, archive, wireHealth, leaseAcquire } from '../lib/wire-store.mj
 import { sessionFile, transaction } from '../lib/store.mjs';
 const from = 'codex:11111111-1111-4111-8111-111111111111';
 const to = 'claude:22222222-2222-4222-8222-222222222222';
-const root = t => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'wire-recovery-')); t.after(() => fs.rmSync(p, { recursive: true, force: true })); return p; };
+const WIRE_CAPACITY = 100;
+const root = t => { const p = fs.mkdtempSync(path.join(os.tmpdir(), 'wire-recovery-')); fs.mkdirSync(path.join(p,'.wire')); fs.writeFileSync(path.join(p,'.wire/config.json'),JSON.stringify({maxMessages:WIRE_CAPACITY})); t.after(() => fs.rmSync(p, { recursive: true, force: true })); return p; };
 const msg = (overrides = {}) => ({ id: randomUUID(), from, to, kind: 'assignment', task: 'recovery', revision: 'abc123', summary: 'A task', ...overrides });
 const age = (p, at) => transaction(path.join(p, '.wire/wire.json'), state => { for (const m of state.messages) m.createdAt = at; return state; });
 
@@ -42,7 +43,7 @@ test('recent recipient event does not protect an abandoned sender assignment', t
   assert.equal(archive(p, now).orphaned.length, 1);
 });
 
-import { operatorCancel, get, status, receive, WIRE_CAPACITY } from '../lib/wire-store.mjs';
+import { operatorCancel, get, status, receive } from '../lib/wire-store.mjs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const cli = fileURLToPath(new URL('../bin/the-wire.mjs', import.meta.url));
@@ -110,4 +111,48 @@ test('archive write failure never removes live messages', t => {
   fs.writeFileSync(path.join(p,'.wire/archive'),'not a directory');
   assert.throws(()=>archive(p));
   assert.equal(list(p)[0].hash,m.hash);
+});
+
+import { wireConfig, DEFAULT_LIMITS } from '../lib/store.mjs';
+const configure = (p, limits) => fs.writeFileSync(path.join(p,'.wire/config.json'),JSON.stringify(limits));
+test('absent config uses new defaults and reads legacy envelopes without migration', t => {
+  const p=root(t); fs.unlinkSync(path.join(p,'.wire/config.json'));
+  assert.deepEqual(wireConfig(p),{maxMessages:500,maxBytes:2097152,maxText:4000,maxStatus:4000});
+  const m=enqueue(p,msg({summary:'x'.repeat(4000)}));
+  const before=fs.readFileSync(path.join(p,'.wire/wire.json'),'utf8');
+  assert.equal(get(p,m.envelope.id).hash,m.hash);
+  assert.equal(fs.readFileSync(path.join(p,'.wire/wire.json'),'utf8'),before);
+  assert.throws(()=>enqueue(p,msg({kind:'notice',summary:'x'.repeat(4001)})),/4000/);
+  receive(p,m.envelope.id,to,m.hash);
+  const done=status(p,m.envelope.id,to,'completed','abc123','x'.repeat(4000));
+  assert.equal(get(p,done.notice).envelope.summary.endsWith('x'.repeat(4000)),true);
+});
+test('configured limits enforce message, text, status and byte caps with rollback', t => {
+  const p=root(t);configure(p,{maxMessages:2,maxText:20,maxStatus:30});
+  const m=enqueue(p,msg());receive(p,m.envelope.id,to,m.hash);
+  assert.throws(()=>enqueue(p,msg({kind:'notice',summary:'x'.repeat(21)})),/20/);
+  assert.throws(()=>status(p,m.envelope.id,to,'completed','abc123','x'.repeat(31)),/30/);
+  status(p,m.envelope.id,to,'blocked','abc123','x'.repeat(30));
+  assert.throws(()=>enqueue(p,msg({kind:'notice'})),/capacity/);
+  const q=root(t); configure(q,{maxBytes:100});
+  assert.throws(()=>enqueue(q,msg()),/capacity/);
+  assert.equal(list(q).length,0);
+  for(const limits of [{maxMessages:0},{maxText:1.5},{maxStatus:'4000'},{maxBytes:67108865},{typo:4}]) {configure(q,limits);assert.throws(()=>wireConfig(q),/config/);}
+});
+test('byte threshold triggers compaction and lowering caps keeps old logs readable', t => {
+  const p=root(t), m=enqueue(p,msg({kind:'notice',summary:'x'.repeat(4000)}));receive(p,m.envelope.id,to,m.hash);
+  const bytes=wireHealth(p).bytes;
+  configure(p,{maxBytes:Math.floor(bytes/0.9)});
+  const n=enqueue(p,msg({kind:'notice'}));
+  assert.deepEqual(list(p).map(m=>m.envelope.id),[n.envelope.id]);
+  assert.equal(get(p,m.envelope.id).hash,m.hash);
+  configure(p,{maxBytes:100,maxMessages:1,maxText:1});
+  assert.equal(get(p,m.envelope.id).hash,m.hash,'archive read is independent of lowered write cap');
+  assert.equal(get(p,n.envelope.id).hash,n.hash,'live read is independent of lowered write cap');
+});
+test('CLI accepts the full configured text budget without charging WIRE-ID metadata', t => {
+  const p=root(t);configure(p,{maxText:40});
+  const r=spawnSync(process.execPath,[cli,'send','--root',p,'--from',from,'--to',to,'--kind','notice','--task','limit','--summary','x'.repeat(40)],{encoding:'utf8',windowsHide:true,env:{...process.env,USERPROFILE:p,HOME:p}});
+  assert.equal(r.status,0,r.stderr);
+  assert.ok(JSON.parse(r.stdout).enqueued.envelope.summary.endsWith('x'.repeat(40)));
 });

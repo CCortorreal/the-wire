@@ -33,7 +33,7 @@ the-wire send --from <me> --in-reply-to <message-id> --kind notice --summary "<r
   it is an assignment. A bare `--to codex|claude` is refused when more than one session of that
   provider is live; address the exact endpoint or scoped mailbox. A recipient with a `blocked`
   assignment gets `resubmit`, never a fresh assignment. (Session review 2026-09-21.)
-- Summary ≤1200 chars, curated, no secrets or raw documents. The CLI refuses credential shapes.
+- Summary ≤4000 chars, curated, no secrets or raw documents. The CLI refuses credential shapes.
 - Report the result in three separate states: stored ✓ · transport accepted/unconfirmed ·
   received (only when `read --id` says so). **End your turn after sending**; replies arrive as
   your next input.

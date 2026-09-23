@@ -25,7 +25,7 @@ and the envelope's `to` is then immutable — a later takeover does not retarget
   "from": "claude:…", "to": "codex:…",
   "task": "identifier", "kind": "assignment | notice",
   "revision": "exact commit hash or artifact version",
-  "summary": "curated text ≤1200 chars",
+  "summary": "curated text ≤4000 chars",
   "references": ["relative/path/in/root.md:12"],
   "supersedes": "uuid | null"
 }
@@ -104,7 +104,7 @@ receipt and never produces an acknowledgment — this is what prevents ACK loops
 
 ## Capacity and archive
 
-The live log holds 100 messages / 256 KB. Rolling `archive` moves completed, cancelled,
+The live log holds 500 messages / 2 MB. Rolling `archive` moves completed, cancelled,
 superseded and orphaned work to `.wire/archive/wire-<utc>-<unique>.json`, retaining open work.
 Notices older than 24 hours with no live recipient lease or recent session event are archived
 as `undelivered`. Assignments use the same inactivity test on the sender and become `orphaned`.
@@ -232,3 +232,15 @@ from a different flag. This prevents wasted lease-acquire attempts on every hook
 Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
 
 Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.
+
+Limits come from optional `.wire/config.json` (missing keys use defaults):
+
+```json
+{"maxMessages":500,"maxBytes":2097152,"maxText":4000,"maxStatus":4000}
+```
+
+Values must be positive integers; unknown keys are rejected. Maxima are 100000 messages,
+64 MiB, and 1000000 characters per text/status field. `health` reports effective limits and
+serialized UTF-8 bytes. Legacy `wire.json` needs no migration. Lowering write limits does
+not prevent reading an existing live log or archive up to 64 MiB. Generated WIRE-ID and
+status-return prefixes do not consume the user text budget. Secret checks still apply.

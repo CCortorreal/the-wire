@@ -158,7 +158,7 @@ the-wire send --root <shared-root> --from <you> --in-reply-to <message-id> --kin
 It also inherits `--task` and `--revision` from the original, so only `--from`, `--kind`,
 and `--summary` are required.
 
-Summaries are curated text (≤1200 chars, ≤1000 for status), never raw files or secrets; the CLI
+Summaries are curated text (≤4000 chars, ≤4000 for status), never raw files or secrets; the CLI
 refuses obvious credential shapes. `--references` are relative paths inside the shared root.
 Put decisions and pointers on the wire; put the work in the repo.
 
@@ -171,10 +171,22 @@ Put decisions and pointers on the wire; put the work in the repo.
 - An explicit `EPERM` connecting to the Claude pipe from inside Codex's Windows sandbox → ask for
   Codex's normal escalated approval and rerun only that user-approved operation. `unconfirmed` by
   itself is not proof of `EPERM`, and silence never authorizes a resend. Do not disable the sandbox.
-- Wire full (100 messages) → `the-wire archive` removes eligible terminal work and keeps open work. Send also archives automatically at 90% full.
+- Wire full (500 messages by default) → `the-wire archive` removes eligible terminal work and keeps open work. Send also archives automatically at 90% full.
 - Protocol details and state machine: `docs/PROTOCOL.md`. What we learned the hard way:
   `docs/FIELD-NOTES.md`.
 
 Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
 
 Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.
+
+Limits come from optional `.wire/config.json` (missing keys use defaults):
+
+```json
+{"maxMessages":500,"maxBytes":2097152,"maxText":4000,"maxStatus":4000}
+```
+
+Values must be positive integers; unknown keys are rejected. Maxima are 100000 messages,
+64 MiB, and 1000000 characters per text/status field. `health` reports effective limits and
+serialized UTF-8 bytes. Legacy `wire.json` needs no migration. Lowering write limits does
+not prevent reading an existing live log or archive up to 64 MiB. Generated WIRE-ID and
+status-return prefixes do not consume the user text budget. Secret checks still apply.
