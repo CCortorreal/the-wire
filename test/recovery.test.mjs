@@ -188,3 +188,59 @@ test('CLI resolves unique prefixes on sender, recipient and reply address to imm
   assert.equal(r.status,0,r.stderr);
   const e=JSON.parse(r.stdout).enqueued.envelope;assert.equal(e.from,from);assert.equal(e.to,to);assert.equal(e.replyTo,reply);
 });
+
+import { beginAttempt, finishAttempt } from '../lib/wire-store.mjs';
+test('archived receipts, transport results and status retries stay idempotent and never revive work', t => {
+  const p=root(t), m=enqueue(p,msg()), attempt=beginAttempt(p,m.envelope.id,from);
+  receive(p,m.envelope.id,to,m.hash);
+  const done=status(p,m.envelope.id,to,'completed','abc123','done');
+  archive(p);
+  assert.equal(receive(p,m.envelope.id,to,m.hash).work,'completed');
+  assert.throws(()=>receive(p,m.envelope.id,from,m.hash),/Recipient/);
+  assert.throws(()=>receive(p,m.envelope.id,to,'wrong'),/hash/);
+  assert.equal(finishAttempt(p,m.envelope.id,attempt.attempt.id,{state:'accepted'}).work,'completed');
+  assert.equal(status(p,m.envelope.id,to,'completed','abc123','done').notice,done.notice);
+  assert.throws(()=>status(p,m.envelope.id,to,'working','abc123','late'),/closed/);
+  assert.equal(list(p).length,1,'only the original return notice stays live');
+  age(p,new Date(Date.now()-86400001).toISOString());archive(p);
+  const r=spawnSync(process.execPath,[cli,'status','--root',p,'--id',m.envelope.id,'--as',to,'--state','completed','--revision','abc123'],{encoding:'utf8',windowsHide:true,input:JSON.stringify({summary:'done'})});
+  assert.equal(r.status,0,r.stderr);assert.equal(list(p).length,0);
+});
+test('operator cancel retries survive rolling archive without a second audit entry', t => {
+  const p=root(t), m=enqueue(p,msg());operatorCancel(p,m.envelope.id,'carlos','ended');archive(p);
+  assert.equal(operatorCancel(p,m.envelope.id,'carlos','ended').work,'cancelled');
+  assert.equal(fs.readFileSync(path.join(p,'.wire/operator.log'),'utf8').trim().split('\n').length,1);
+  assert.equal(list(p).length,0);
+});
+test('unreadable and malformed session evidence never makes old assignments orphaned', t => {
+  for(const contents of ['broken json', '{}', '{"events":[{"at":"invalid"}]}']) {
+    const p=root(t), m=enqueue(p,msg());age(p,new Date(Date.now()-86400001).toISOString());
+    const record=sessionFile(p,...from.split(':'));fs.mkdirSync(path.dirname(record),{recursive:true});fs.writeFileSync(record,contents);
+    assert.equal(archive(p).messages,0);assert.equal(get(p,m.envelope.id).work,'queued');
+  }
+});
+test('configured status budget above the old stdin ceiling is honored by CLI', t => {
+  const p=root(t);configure(p,{maxText:20000,maxStatus:20000});
+  const m=enqueue(p,msg());receive(p,m.envelope.id,to,m.hash);
+  const r=spawnSync(process.execPath,[cli,'status','--root',p,'--id',m.envelope.id,'--as',to,'--state','working','--revision','abc123'],{encoding:'utf8',windowsHide:true,input:JSON.stringify({summary:'x'.repeat(18000)})});
+  assert.equal(r.status,0,r.stderr);assert.equal(get(p,m.envelope.id).status.summary.length,18000);
+});
+
+test('legacy archives without disposition metadata still recognize late receipts', t => {
+  const p=root(t), m=enqueue(p,msg());receive(p,m.envelope.id,to,m.hash);
+  status(p,m.envelope.id,to,'completed','abc123','done');
+  const result=archive(p), filename=path.join(p,result.archive);
+  const legacy=JSON.parse(fs.readFileSync(filename,'utf8'));
+  delete legacy.messages[0].archive;fs.writeFileSync(filename,JSON.stringify(legacy));
+  assert.equal(get(p,m.envelope.id).archive.legacy,true);
+  assert.equal(receive(p,m.envelope.id,to,m.hash).work,'completed');
+  assert.equal(list(p).length,1);
+});
+test('live logs larger than the legacy byte cap read and archive with default limits', t => {
+  const p=root(t);fs.unlinkSync(path.join(p,'.wire/config.json'));
+  for(let i=0;i<70;i++){const m=enqueue(p,msg({kind:'notice',summary:'x'.repeat(4000)}));receive(p,m.envelope.id,to,m.hash);}
+  assert.ok(wireHealth(p).bytes>256*1024);
+  const r=archive(p);assert.equal(r.messages,70);assert.equal(list(p).length,0);
+  const saved=JSON.parse(fs.readFileSync(path.join(p,r.archive),'utf8'));
+  assert.equal(get(p,saved.messages[0].envelope.id).hash,saved.messages[0].hash);
+});

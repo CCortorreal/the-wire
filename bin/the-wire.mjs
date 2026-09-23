@@ -13,7 +13,7 @@ import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
 import { sweep, acquireLock, releaseLock } from '../lib/steward.mjs';
-import { repair } from '../lib/store.mjs';
+import { repair, wireConfig } from '../lib/store.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
@@ -69,7 +69,7 @@ try {
   if (!verb || verb === 'help' || verb === '--help') { console.log(USAGE); process.exit(0); }
   if (!flags['--root']) throw Error('Explicit --root <shared-root> required (the directory both sessions work in)');
   const root = path.resolve(flags['--root']);
-  const stdinJson = () => { const b = fs.readFileSync(0); if (b.length > 16384) throw Error('Input too large'); return JSON.parse(b.toString('utf8').replace(/^﻿/, '')); };
+  const stdinJson = () => { const limits = wireConfig(root); const b = fs.readFileSync(0); if (b.length > 6 * (3 * limits.maxText + limits.maxStatus) + 32768) throw Error('Input too large'); return JSON.parse(b.toString('utf8').replace(/^﻿/, '')); };
   const resolveAddress = (value, label) => {
     if (!value) throw Error(`${label} required`);
     if (value.includes(':')) return resolveEndpointPrefix(root, value);
@@ -279,7 +279,7 @@ try {
     case 'status': {
       const detail = stdinJson();
       result = status(root, flags['--id'], flags['--as'], flags['--state'], flags['--revision'], detail.summary, detail.references);
-      if (result.notice) { const n = get(root, result.notice); result.notification = n.delivery === 'pending' ? dispatch(root, result.notice, flags['--as']) : n; }
+      if (result.notice) { const n = get(root, result.notice); result.notification = n.delivery === 'pending' && !n.archive ? dispatch(root, result.notice, flags['--as']) : n; }
       break;
     }
     case 'who': result = { sessions: who(root) }; break;

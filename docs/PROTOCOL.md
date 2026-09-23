@@ -2,7 +2,8 @@
 
 Local, file-backed, two-provider messaging between live agent sessions. All state lives in
 `<shared-root>/.wire/`: `wire.json` (the log), `cursors.json`, `leases.json`, `archive/`,
-`wake.log`, optional `config.json`, and the append-only `operator.log`. State-file writes is a locked transaction (temp file → fsync → rename). This version is
+`wake.log`, optional `config.json`, and the append-only `operator.log`. State-file writes use locked
+transactions (temp file → fsync → rename). This version is
 local-machine only; do not put `.wire/` under a concurrent sync writer.
 
 ## Endpoints and mailboxes
@@ -117,10 +118,13 @@ The live log holds 500 messages / 2 MB. Rolling `archive` moves completed, cance
 superseded and orphaned work to `.wire/archive/wire-<utc>-<unique>.json`, retaining open work.
 Notices older than 24 hours with no live recipient lease or recent session event are archived
 as `undelivered`. Assignments use the same inactivity test on the sender and become `orphaned`.
-Sequences, cursors and leases survive. No eligible messages means a no-op.
+Unreadable or malformed session evidence retains the message. Sequences, cursors and leases
+survive. No eligible messages means a no-op.
 Send automatically runs rolling archive at 90% of either live-log cap before insertion.
 Open work can still fill the log; capacity then refuses the send without losing it.
 `read --id` can read archived records; retrying an archived ID deduplicates against its hash.
+Late receipts and matching status/cancel retries recognize archives without reviving work
+or generating another notice. A return notice already archived is never dispatched again.
 Archive is written before the live log is replaced: an interrupted commit may leave a duplicate
 archive copy, but never deletes the only copy of a message.
 
