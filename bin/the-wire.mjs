@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROVIDERS, operatorCancel, endpoint, enqueue, enqueueReplace, get, list, receive, status, resubmit as storeResubmit, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
+import { PROVIDERS, who, resolveEndpointPrefix, operatorCancel, endpoint, enqueue, enqueueReplace, get, list, receive, status, resubmit as storeResubmit, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
@@ -26,6 +26,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   install   --provider claude|codex        copy the skill into your provider's skill dir; print the hook snippet
   resubmit  --id <uuid> --as <endpoint>   turn a blocked review into a superseding assignment (bumps task version)
   lease     acquire|renew|release|list     --mailbox <name> --as <provider:uuid> [--ttl ms] [--fence n]
+  who                                      endpoint directory: mailboxes, lease age and last seen
   roster    [--provider claude|codex]      all active sessions grouped by provider, with their mailbox names
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
             --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>|auto] [--reply-to <mailbox|endpoint>] [--in-reply-to <message-id>] [--references a,b]
@@ -71,7 +72,7 @@ try {
   const stdinJson = () => { const b = fs.readFileSync(0); if (b.length > 16384) throw Error('Input too large'); return JSON.parse(b.toString('utf8').replace(/^﻿/, '')); };
   const resolveAddress = (value, label) => {
     if (!value) throw Error(`${label} required`);
-    if (value.includes(':')) return endpoint(value);
+    if (value.includes(':')) return resolveEndpointPrefix(root, value);
     const resolved = leaseResolve(root, value);
     if (resolved) {
       // Wire grammar (2026-09-21): a bare provider name is refused when more than one session of that
@@ -279,6 +280,7 @@ try {
       if (result.notice) { const n = get(root, result.notice); result.notification = n.delivery === 'pending' ? dispatch(root, result.notice, flags['--as']) : n; }
       break;
     }
+    case 'who': result = { sessions: who(root) }; break;
     case 'roster': {
       const requested = flags['--provider'];
       if (requested && !PROVIDERS.includes(requested)) throw Error('--provider claude|codex required');

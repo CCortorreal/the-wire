@@ -190,3 +190,10 @@ Values must be positive integers; unknown keys are rejected. Maxima are 100000 m
 serialized UTF-8 bytes. Legacy `wire.json` needs no migration. Lowering write limits does
 not prevent reading an existing live log or archive up to 64 MiB. Generated WIRE-ID and
 status-return prefixes do not consume the user text budget. Secret checks still apply.
+
+`the-wire who` lists known endpoints, their mailboxes (including expired ones), lease ages
+in milliseconds, and last seen timestamps from lease heartbeats or local session events.
+An endpoint known only from a message has no mailbox and a null last-seen value. This is
+a local directory, not proof that a session is running. `send --from`, `--to` and `--reply-to`
+accept unique `provider:uuid-prefix` addresses; an ambiguous prefix fails with every matching
+endpoint and its mailbox names. A full endpoint remains valid without a lease.

@@ -156,3 +156,35 @@ test('CLI accepts the full configured text budget without charging WIRE-ID metad
   assert.equal(r.status,0,r.stderr);
   assert.ok(JSON.parse(r.stdout).enqueued.envelope.summary.endsWith('x'.repeat(40)));
 });
+
+import { who, resolveEndpointPrefix } from '../lib/wire-store.mjs';
+test('endpoint prefix collisions report every endpoint and mailbox without enqueueing', t => {
+  const p=root(t), a='codex:01a0cef8-1111-4111-8111-111111111111', b='codex:01a0cef9-2222-4222-8222-222222222222';
+  leaseAcquire(p,'codex.broker',a,[],60000);leaseAcquire(p,'codex.peer',b,[],60000);
+  assert.throws(()=>resolveEndpointPrefix(p,'codex:01a0cef'),e=>e.message.includes(a)&&e.message.includes(b)&&e.message.includes('codex.broker')&&e.message.includes('codex.peer'));
+  assert.equal(resolveEndpointPrefix(p,'codex:01a0cef8'),a);
+  assert.equal(resolveEndpointPrefix(p,from),from,'full endpoint does not require a directory entry');
+  assert.throws(()=>resolveEndpointPrefix(p,'codex:ffffffff'),/No known endpoint/);
+  const r=spawnSync(process.execPath,[cli,'send','--root',p,'--from',to,'--to','codex:01a0cef','--kind','notice','--task','prefix','--summary','FYI'],{encoding:'utf8',windowsHide:true});
+  assert.equal(r.status,1);assert.match(r.stderr,/codex.broker/);assert.match(r.stderr,/codex.peer/);assert.equal(list(p).length,0);
+});
+test('who shows multiple mailboxes, lease age, recent session events and mailboxless endpoints', t => {
+  const p=root(t), lease=leaseAcquire(p,'codex.broker',from,[],60000);leaseAcquire(p,'codex.extra',from,[],60000);
+  const at=new Date(Date.parse(lease.heartbeatAt)+1000).toISOString();
+  transaction(sessionFile(p,...from.split(':')),()=>({events:[{at}]}));
+  enqueue(p,msg());
+  const rows=who(p,new Date(Date.parse(lease.acquiredAt)+2000));
+  const row=rows.find(r=>r.endpoint===from);
+  assert.deepEqual(row.mailboxes.map(b=>b.mailbox),['codex.broker','codex.extra']);
+  assert.equal(row.mailboxes[0].leaseAgeMs,2000);assert.equal(row.lastSeen,at);
+  assert.deepEqual(rows.find(r=>r.endpoint===to),{endpoint:to,mailboxes:[],lastSeen:null});
+  const r=spawnSync(process.execPath,[cli,'who','--root',p],{encoding:'utf8',windowsHide:true});
+  assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).sessions.length,2);
+});
+test('CLI resolves unique prefixes on sender, recipient and reply address to immutable endpoints', t => {
+  const p=root(t), reply='claude:33333333-3333-4333-8333-333333333333';
+  leaseAcquire(p,'sender',from,[],60000);leaseAcquire(p,'recipient',to,[],60000);leaseAcquire(p,'reply',reply,[],60000);
+  const r=spawnSync(process.execPath,[cli,'send','--root',p,'--from','codex:1111','--to','claude:2222','--reply-to','claude:3333','--kind','notice','--task','prefix','--summary','FYI'],{encoding:'utf8',windowsHide:true,env:{...process.env,USERPROFILE:p,HOME:p}});
+  assert.equal(r.status,0,r.stderr);
+  const e=JSON.parse(r.stdout).enqueued.envelope;assert.equal(e.from,from);assert.equal(e.to,to);assert.equal(e.replyTo,reply);
+});
