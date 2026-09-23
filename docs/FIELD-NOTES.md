@@ -102,7 +102,8 @@ the guess the-wire replaces with leases: the agent that leased `codex` is the on
 
 ## 11. Caps and recovery
 
-Default summaries: 4000 chars. Status summaries: 4000. Log: 500 messages / 2 MB. The earlier 1200/1000-character and 100-message / 256 KB caps caused operational jams. The limits are configurable: the wire carries decisions and pointers;
+Default summaries: 4000 chars. Status summaries: 4000. Log: 500 messages / 2 MB. These replace the previous 1200/1000-character and 100-message / 256 KB defaults.
+The limits are configurable; the wire carries decisions and pointers;
 the repo carries the work.
 
 Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
@@ -131,6 +132,13 @@ An endpoint known only from a message has no mailbox and a null last-seen value.
 a local directory, not proof that a session is running. `send --from`, `--to` and `--reply-to`
 accept unique `provider:uuid-prefix` addresses; an ambiguous prefix fails with every matching
 endpoint and its mailbox names. A full endpoint remains valid without a lease.
+
+
+Ask-shaped notice text (questions, review requests, or similar phrasing) produces an advisory
+warning on stderr and in the successful send result, never a refusal. The envelope remains a
+notice with `expectsResponse: false`. Optional `--notice-reason` records context. Use an
+assignment with required `--done-state` when the recipient owes work; normal validation,
+addressing and capacity failures still reject sends.
 
 ## 12. POSIX behavior is a design reading, not a port — **suspected**
 

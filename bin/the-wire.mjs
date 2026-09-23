@@ -31,7 +31,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   send      --from <mailbox|endpoint> --to <mailbox|endpoint> --kind assignment|notice --task <id>
             --summary "<text>" | --summary-stdin  [--revision <rev>] [--supersedes <id>|auto] [--reply-to <mailbox|endpoint>] [--in-reply-to <message-id>] [--references a,b]
             assignment: --done-state "<what the recipient reports when done>" (required) [--domain <task-domain>]
-            notice:     refused when the summary reads like an ask, unless --notice-reason "<why no reply is needed>"
+            notice:     warns on success when the summary reads like an ask; optional --notice-reason "<why no reply is needed>"
             a bare --to codex|claude is refused when >1 session of that provider is live; the resolution is printed
   lease acquire … [--task-domain <name>]   bind this session to a task domain (assignments for another domain are flagged WRONG-CHAIR)
   enqueue   (JSON envelope on stdin)       lower-level: store without dispatching
@@ -231,9 +231,10 @@ try {
       const env = { id, from, to, kind: flags['--kind'], task: flags['--task'], revision, summary: `WIRE-ID: ${id}. ${summary}`, references: flags['--references'] ? flags['--references'].split(',') : [], replyTo };
       // ── Wire grammar (2026-09-21 session review, proposal-v2 item 1) ──
       // assignment = work with a done-state → --done-state is required and stored (expectsResponse: true).
-      // notice = information → refused when the summary reads like an ask, unless --notice-reason says
-      // why no reply is needed (stored on the envelope for the next review). A blocked recipient gets
+      // notice = information; ask-shaped text is advisory, and --notice-reason can record context.
+      // Warnings are emitted only after storage succeeds. A blocked recipient gets
       // `resubmit`, never a fresh assignment. Real cases: 807f213f, b93a8ad0 (work sent as notices).
+      const warnings = [];
       if (env.kind === 'assignment') {
         if (!flags['--done-state']) throw Error('assignment requires --done-state "<what the recipient reports when done>" — the structured field is the proof it is work, not information');
         env.doneState = flags['--done-state']; env.expectsResponse = true;
@@ -242,7 +243,7 @@ try {
         if (active && active.work === 'blocked') throw Error(`Recipient has a blocked assignment ${active.envelope.id} (${active.envelope.task}). Do not send a fresh one — the-wire resubmit --id ${active.envelope.id} --as ${from} --revision <rev> --root <root>`);
       } else {
         const ask = noticeReadsLikeAsk(summary);
-        if (ask && !flags['--notice-reason']) throw Error(`notice reads like an ask (${ask}). A notice needs no reply: send --kind assignment with --done-state, or add --notice-reason "<why no reply is needed>"`);
+        if (ask) warnings.push(`notice reads like an ask (${ask}). Notices need no reply; use an assignment with --done-state when you expect work.`);
         if (flags['--notice-reason']) env.noticeReason = flags['--notice-reason'];
         env.expectsResponse = false;
       }
@@ -263,9 +264,10 @@ try {
         enqueued = enqueue(root, env);
       }
       let dispatched = null; try { dispatched = dispatch(root, id, from); } catch {}
-      result = { enqueued, replaced, dispatched,
+      result = { enqueued, replaced, dispatched, warnings,
         openIncomingAssignments: openIncoming.map(m => ({ id: m.envelope.id, state: m.work })),
         meaning: dispatched?.delivery === 'accepted' ? 'Transport accepted the message. That is not receipt; check `read --id` for delivery=received.' : 'Transport did not confirm. The message is stored; the recipient pulls it on its next prompt (if its hook is installed) or a steward sweep re-wakes it.' };
+      for (const warning of warnings) console.error(`the-wire: warning: ${warning}`);
       break;
     }
     case 'enqueue': result = enqueue(root, stdinJson()); break;

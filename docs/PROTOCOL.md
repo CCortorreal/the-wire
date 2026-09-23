@@ -2,7 +2,7 @@
 
 Local, file-backed, two-provider messaging between live agent sessions. All state lives in
 `<shared-root>/.wire/`: `wire.json` (the log), `cursors.json`, `leases.json`, `archive/`,
-`wake.log`. Every write is a locked transaction (temp file → fsync → rename). This version is
+`wake.log`, optional `config.json`, and the append-only `operator.log`. State-file writes is a locked transaction (temp file → fsync → rename). This version is
 local-machine only; do not put `.wire/` under a concurrent sync writer.
 
 ## Endpoints and mailboxes
@@ -40,6 +40,12 @@ Text validation is fail-closed: control bytes, over-length text, and credential-
 be relative, inside the root, and free of `..`, `vault`, `secret`, `credential`, `.pem`, `.key`.
 These are backstops; the sender is responsible for what it puts on the wire.
 
+Ask-shaped notice text (questions, review requests, or similar phrasing) produces an advisory
+warning on stderr and in the successful send result, never a refusal. The envelope remains a
+notice with `expectsResponse: false`. Optional `--notice-reason` records context. Use an
+assignment with required `--done-state` when the recipient owes work; normal validation,
+addressing and capacity failures still reject sends.
+
 ## Two independent state machines
 
 **Delivery** (what the transport knows):
@@ -59,8 +65,9 @@ These are backstops; the sender is responsible for what it puts on the wire.
 | `queued` | enqueue |
 | `received` | first receipt of an assignment (notices go straight to `completed`) |
 | `working` / `blocked` / `completed` | the recipient, via `status`, on the exact revision |
-| `cancelled` | the sender, via `status --state cancelled` |
+| `cancelled` | the sender via `status --state cancelled`, or operator recovery via `cancel` |
 | `superseded` | a newer assignment with `supersedes` |
+| `orphaned` | archive after the sender inactivity and age checks |
 
 Rules the store enforces: transport can never assert `received`; a receipt that races a returning
 transport wins; a terminal work state cannot be revived by a late receipt or status; `status`
@@ -102,6 +109,8 @@ party (`"<state>: <id>. <summary>"`) and links it on the assignment. Repeating t
 idempotent (same notice, no duplicate). `working` creates no notice. A notice is terminal on
 receipt and never produces an acknowledgment — this is what prevents ACK loops.
 
+Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.
+
 ## Capacity and archive
 
 The live log holds 500 messages / 2 MB. Rolling `archive` moves completed, cancelled,
@@ -114,6 +123,18 @@ Open work can still fill the log; capacity then refuses the send without losing 
 `read --id` can read archived records; retrying an archived ID deduplicates against its hash.
 Archive is written before the live log is replaced: an interrupted commit may leave a duplicate
 archive copy, but never deletes the only copy of a message.
+
+Limits come from optional `.wire/config.json` (missing keys use defaults):
+
+```json
+{"maxMessages":500,"maxBytes":2097152,"maxText":4000,"maxStatus":4000}
+```
+
+Values must be positive integers; unknown keys are rejected. Maxima are 100000 messages,
+64 MiB, and 1000000 characters per text/status field. `health` reports effective limits and
+serialized UTF-8 bytes. Legacy `wire.json` needs no migration. Lowering write limits does
+not prevent reading an existing live log or archive up to 64 MiB. Generated WIRE-ID and
+status-return prefixes do not consume the user text budget. Secret checks still apply.
 
 ## Activation boundary
 
@@ -149,6 +170,13 @@ a manually acquired mailbox stays alive as long as the session keeps prompting.
 exact endpoint regardless of which mailboxes it holds. Mailboxes are a naming convenience for
 senders; they do not gate receipt.
 
+`the-wire who` lists known endpoints, their mailboxes (including expired ones), lease ages
+in milliseconds, and last seen timestamps from lease heartbeats or local session events.
+An endpoint known only from a message has no mailbox and a null last-seen value. This is
+a local directory, not proof that a session is running. `send --from`, `--to` and `--reply-to`
+accept unique `provider:uuid-prefix` addresses; an ambiguous prefix fails with every matching
+endpoint and its mailbox names. A full endpoint remains valid without a lease.
+
 ## Reply-to redirection (`--reply-to`)
 
 Assignments can carry an optional `replyTo` endpoint or mailbox. When the recipient reports
@@ -157,7 +185,7 @@ original sender. This lets a desk session send work on behalf of a specialized s
 
 ```
 send --from claude --to codex.minecraft --reply-to claude.minecraft \
-     --kind assignment --task architecture-review --summary "..."
+     --kind assignment --task architecture-review --summary "..." --done-state "review verdict"
 ```
 
 When Codex completes the review, the return notice goes to `claude.minecraft`, not `claude` (the
@@ -229,25 +257,6 @@ from a different flag. This prevents wasted lease-acquire attempts on every hook
 - Live round trips Claude ⇄ Codex, hook-pulled receipt, and steward re-wake: observed on one
   Windows 11 machine in September 2026. Not yet observed on macOS/Linux — see `docs/FIELD-NOTES.md`.
 
-Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
-
-Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.
-
-Limits come from optional `.wire/config.json` (missing keys use defaults):
-
-```json
-{"maxMessages":500,"maxBytes":2097152,"maxText":4000,"maxStatus":4000}
-```
-
-Values must be positive integers; unknown keys are rejected. Maxima are 100000 messages,
-64 MiB, and 1000000 characters per text/status field. `health` reports effective limits and
-serialized UTF-8 bytes. Legacy `wire.json` needs no migration. Lowering write limits does
-not prevent reading an existing live log or archive up to 64 MiB. Generated WIRE-ID and
-status-return prefixes do not consume the user text budget. Secret checks still apply.
-
-`the-wire who` lists known endpoints, their mailboxes (including expired ones), lease ages
-in milliseconds, and last seen timestamps from lease heartbeats or local session events.
-An endpoint known only from a message has no mailbox and a null last-seen value. This is
-a local directory, not proof that a session is running. `send --from`, `--to` and `--reply-to`
-accept unique `provider:uuid-prefix` addresses; an ambiguous prefix fails with every matching
-endpoint and its mailbox names. A full endpoint remains valid without a lease.
+<!-- EVIDENCE id=broker-recovery-tests rung=supported n=1 blind="temporary roots on one Windows host; live wire unchanged" detector=validated -->
+Recovery, configurable caps, prefix collisions and notice warnings have regression coverage in
+`test/recovery.test.mjs` and `test/grammar.test.mjs`. Live recovery awaits operator review.
