@@ -174,3 +174,5 @@ Put decisions and pointers on the wire; put the work in the repo.
 - Wire full (100 messages) → when nothing is outstanding, `the-wire archive`.
 - Protocol details and state machine: `docs/PROTOCOL.md`. What we learned the hard way:
   `docs/FIELD-NOTES.md`.
+
+Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.

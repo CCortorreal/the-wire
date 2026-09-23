@@ -223,3 +223,5 @@ from a different flag. This prevents wasted lease-acquire attempts on every hook
   the CLI end to end against a stubbed Codex binary.
 - Live round trips Claude ⇄ Codex, hook-pulled receipt, and steward re-wake: observed on one
   Windows 11 machine in September 2026. Not yet observed on macOS/Linux — see `docs/FIELD-NOTES.md`.
+
+Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
