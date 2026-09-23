@@ -140,7 +140,7 @@ assignment; task <id>; revision <rev>.
 4. If it is a **notice**: read it; no reply. Never acknowledge an acknowledgment.
 
 One active assignment per recipient at a time. To replace one, send a new assignment with
-`--supersedes <old-id>`. Only the sender cancels (`--state cancelled`).
+`--supersedes <old-id>`. The sender cancels with `status --state cancelled`; operator recovery is described below.
 
 ## Sending, from now on
 
@@ -176,3 +176,5 @@ Put decisions and pointers on the wire; put the work in the repo.
   `docs/FIELD-NOTES.md`.
 
 Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
+
+Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.

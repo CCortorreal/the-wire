@@ -41,3 +41,40 @@ test('recent recipient event does not protect an abandoned sender assignment', t
   transaction(sessionFile(p, ...to.split(':')), () => ({ events: [{ at: now.toISOString() }] }));
   assert.equal(archive(p, now).orphaned.length, 1);
 });
+
+import { operatorCancel, get, status, receive, WIRE_CAPACITY } from '../lib/wire-store.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+const cli = fileURLToPath(new URL('../bin/the-wire.mjs', import.meta.url));
+test('operator cancellation works at capacity, audits reason and retries without duplicates', t => {
+  const p = root(t), m = enqueue(p, msg());
+  for(let i=1;i<WIRE_CAPACITY;i++) enqueue(p, msg({kind:'notice'}));
+  const r = spawnSync(process.execPath, [cli, 'cancel', '--root', p, '--id', m.envelope.id, '--operator', 'carlos', '--reason', 'Sender session ended'], {encoding:'utf8', windowsHide:true});
+  assert.equal(r.status, 0, r.stderr);
+  const cancelled = JSON.parse(r.stdout);
+  assert.equal(cancelled.status.operator, 'carlos');
+  assert.equal(cancelled.status.reason, 'Sender session ended');
+  assert.equal(cancelled.work, 'cancelled');
+  assert.equal(wireHealth(p).used, WIRE_CAPACITY);
+  const log = fs.readFileSync(path.join(p, '.wire/operator.log'), 'utf8');
+  assert.equal(JSON.parse(log).operationId, cancelled.status.operationId);
+  operatorCancel(p, m.envelope.id, 'carlos', 'Sender session ended');
+  assert.equal(fs.readFileSync(path.join(p, '.wire/operator.log'), 'utf8'), log);
+  receive(p, m.envelope.id, to, m.hash);
+  assert.throws(() => status(p, m.envelope.id, to, 'working', 'abc123', 'late'), /closed/);
+});
+test('operator cancel guards live sender, invalid operator/reason, terminal states and audit failure', t => {
+  const p = root(t), m = enqueue(p, msg());
+  for (const [op, reason] of [['peer','exited'], ['carlos',' '], ['carlos','password=unsafe']]) assert.throws(() => operatorCancel(p,m.envelope.id,op,reason));
+  leaseAcquire(p,'sender',from,[],60000);
+  assert.throws(() => operatorCancel(p,m.envelope.id,'carlos','exited'), /live lease/);
+  assert.equal(get(p,m.envelope.id).work,'queued');
+  assert.equal(fs.existsSync(path.join(p,'.wire/operator.log')),false);
+  const q=root(t), n=enqueue(q,msg());
+  fs.mkdirSync(path.join(q,'.wire/operator.log'));
+  assert.throws(() => operatorCancel(q,n.envelope.id,'carlos','exited'));
+  assert.equal(get(q,n.envelope.id).work,'queued');
+  const r=root(t), o=enqueue(r,msg());
+  operatorCancel(r,o.envelope.id,'carlos','exited');
+  assert.throws(() => operatorCancel(r,o.envelope.id,'carlos','different'), /closed/);
+});

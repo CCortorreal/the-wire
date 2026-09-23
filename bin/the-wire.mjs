@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROVIDERS, endpoint, enqueue, enqueueReplace, get, list, receive, status, resubmit as storeResubmit, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
+import { PROVIDERS, operatorCancel, endpoint, enqueue, enqueueReplace, get, list, receive, status, resubmit as storeResubmit, leaseAcquire, leaseRenew, leaseRelease, leaseResolve, leaseList, leaseRenewEndpoint, leasesByPrefix, activeAssignment, wireHealth, archive, pull } from '../lib/wire-store.mjs';
 import { dispatch } from '../lib/dispatch.mjs';
 import { discover as discoverClaude } from '../lib/drivers/claude-pipe.mjs';
 import { probeCodex } from '../lib/drivers/codex-queue.mjs';
@@ -18,7 +18,7 @@ import { repair } from '../lib/store.mjs';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LEASE_MS = 30 * 60 * 1000;
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json|new-summary|done-state|notice-reason|domain|task-domain)$/;
+const FLAGS = /^--(root|id|as|hash|state|revision|from|to|reply-to|in-reply-to|kind|task|summary|summary-stdin|supersedes|mailbox|ttl|fence|provider|references|json|new-summary|done-state|notice-reason|domain|task-domain|operator|reason)$/;
 const USAGE = `the-wire <verb> --root <shared-root> [flags]
 
   doctor    [--provider claude|codex]       check provider capabilities and the state dir
@@ -41,6 +41,7 @@ const USAGE = `the-wire <verb> --root <shared-root> [flags]
   receive   --id <uuid> --as <endpoint> --hash <sha256>
   status    --id <uuid> --as <endpoint> --state working|blocked|completed|cancelled --revision <rev>
             ({"summary":"...","references":[...]} on stdin)
+  cancel    --id <uuid> --operator carlos --reason "<text>"  recover an assignment without a live sender lease
   health
   repair                                   fix stale locks, orphaned temps, restore corrupt state from backup
   archive
@@ -307,6 +308,7 @@ try {
       result = { providers: groups, total: leases.length };
       break;
     }
+    case 'cancel': result = operatorCancel(root, flags['--id'], flags['--operator'], flags['--reason']); break;
     case 'health': result = wireHealth(root); break;
     case 'repair': result = repair(root); break;
     case 'archive': result = archive(root); break;

@@ -225,3 +225,5 @@ from a different flag. This prevents wasted lease-acquire attempts on every hook
   Windows 11 machine in September 2026. Not yet observed on macOS/Linux — see `docs/FIELD-NOTES.md`.
 
 Assignments older than 24 hours can be archived as `orphaned` only when their sender has no live lease and no session event in the last 24 hours. Recipient inactivity alone never orphans an assignment.
+
+Operator recovery: `the-wire cancel --id <uuid> --operator carlos --reason "<text>"` cancels an assignment only if its sender holds no live lease. It records operator and reason in status and appends a durable cancel intent to `.wire/operator.log`; the matching status operation ID proves it applied. A crash can leave an intent alone. Identical retries are idempotent. It creates no return notice, so it works at full capacity.
